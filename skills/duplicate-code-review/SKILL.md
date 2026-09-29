@@ -31,6 +31,8 @@ Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build
 5. **Look for what a static tool cannot see** (same purpose, different code): pick 4–8 common helper families (format/parse/normalize/slug/debounce/retry/pagination/date/currency/size/auth/fetch-wrapper/query-client/logger setup/pick/label…), `grep -rn "function <family>\|def <family>"` across the folder, and compare implementations by reading. Also check **module-level setup blocks** repeated across apps/packages (client/config construction).
 6. **Report** (format below). Verify each reported group by reading every member — never report from scores alone.
 
+**Coverage rule.** The tool's list is the recall; your job is to prune it. A repo typically has 100–500 groups, of which 30–50% of the IDENTICAL/NEAR-COPY ones are real. Do not stop after the top few dozen: page through *every* IDENTICAL and NEAR-COPY group with `--brief`, decide each from its line (name, hints, members) and open detail only when unsure, then report every group you judged real (respect a reporting cap if you were given one, best first). Missing a real copy is worse than spending a few more tool calls.
+
 ## Deciding what is noise (very common false positives)
 
 Drop unless the bodies are truly identical *and* it is non-trivial (the tool already tags the commonest shapes `LIKELY-NOISE`):

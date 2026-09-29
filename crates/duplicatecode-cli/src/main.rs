@@ -3,7 +3,7 @@ mod bench;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use duplicatecode_engine::index::Weights;
-use duplicatecode_engine::{diff, find_matches, Corpus, load_units, units_from_file, MatchOptions};
+use duplicatecode_engine::{diff, find_matches, Corpus, load_units, load_units_with, units_from_file, MatchOptions};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -60,7 +60,13 @@ enum Cmd {
     },
     /// Find similar unit pairs inside one repository (self-comparison).
     Scan {
-        path: PathBuf,
+        /// One or more folders (e.g. every package of a monorepo).
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Glob to skip (gitignore syntax, repeatable), e.g. `--exclude '**/generated/**'`.
+        /// `.gitignore` is honoured automatically.
+        #[arg(long)]
+        exclude: Vec<String>,
         #[arg(long, default_value_t = 0.6)]
         threshold: f64,
         #[arg(long, default_value_t = 20)]
@@ -78,6 +84,12 @@ enum Cmd {
         /// Only report pairs whose units are in different files.
         #[arg(long)]
         cross_file: bool,
+        /// List individual pairs instead of grouping them into duplicate groups.
+        #[arg(long = "pairs")]
+        pairs_out: bool,
+        /// Exit with status 1 when anything is found (for CI).
+        #[arg(long)]
+        fail_on_found: bool,
         #[arg(long)]
         json: bool,
     },
@@ -100,6 +112,63 @@ enum Cmd {
         #[arg(long)]
         mutations: bool,
     },
+}
+
+#[derive(serde::Serialize)]
+struct Group {
+    score: f64,
+    units: Vec<duplicatecode_engine::index::UnitRef>,
+}
+
+/// Connected components of the similar-pair graph, best group first.
+fn group_pairs(pairs: &[duplicatecode_engine::Match]) -> Vec<Group> {
+    use std::collections::HashMap;
+    let mut idx: HashMap<String, usize> = HashMap::new();
+    let mut refs: Vec<duplicatecode_engine::index::UnitRef> = Vec::new();
+    let mut parent: Vec<usize> = Vec::new();
+    let mut id = |u: &duplicatecode_engine::index::UnitRef, refs: &mut Vec<_>, parent: &mut Vec<usize>| {
+        *idx.entry(format!("{}:{}", u.file, u.start_line)).or_insert_with(|| {
+            refs.push(u.clone());
+            parent.push(parent.len());
+            parent.len() - 1
+        })
+    };
+    fn find(p: &mut Vec<usize>, x: usize) -> usize {
+        if p[x] != x {
+            let r = find(p, p[x]);
+            p[x] = r;
+        }
+        p[x]
+    }
+    let mut edges = Vec::new();
+    for m in pairs {
+        let a = id(&m.query, &mut refs, &mut parent);
+        let b = id(&m.candidate, &mut refs, &mut parent);
+        edges.push((a, b, m.scores.combined));
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        parent[ra] = rb;
+    }
+    let mut best: HashMap<usize, f64> = HashMap::new();
+    for (a, _, s) in &edges {
+        let r = find(&mut parent, *a);
+        let e = best.entry(r).or_insert(0.0);
+        *e = e.max(*s);
+    }
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..refs.len() {
+        let r = find(&mut parent, i);
+        members.entry(r).or_default().push(i);
+    }
+    let mut groups: Vec<Group> = members
+        .into_iter()
+        .map(|(r, ms)| {
+            let mut units: Vec<_> = ms.into_iter().map(|i| refs[i].clone()).collect();
+            units.sort_by(|a, b| (&a.file, a.start_line).cmp(&(&b.file, b.start_line)));
+            Group { score: best[&r], units }
+        })
+        .collect();
+    groups.sort_by(|a, b| b.score.total_cmp(&a.score));
+    groups
 }
 
 fn main() -> Result<()> {
@@ -151,10 +220,18 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Scan { path, threshold, min_tokens, min_name, profile, min_lines, cross_file, json } => {
-            let units = load_units(&path);
+        Cmd::Scan { paths, exclude, threshold, min_tokens, min_name, profile, min_lines, cross_file, pairs_out, fail_on_found, json } => {
+            let mut units = Vec::new();
+            for p in &paths {
+                for mut u in load_units_with(p, &exclude) {
+                    if paths.len() > 1 {
+                        u.file = format!("{}/{}", p.display(), u.file);
+                    }
+                    units.push(u);
+                }
+            }
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 1, min_name, min_lines, weights: profile.weights(), ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, weights: profile.weights(), ..Default::default() };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units
@@ -170,17 +247,33 @@ fn main() -> Result<()> {
                 })
                 .collect();
             pairs.sort_by(|a, b| b.scores.combined.total_cmp(&a.scores.combined));
-            if json {
-                println!("{}", serde_json::to_string_pretty(&pairs)?);
-            } else {
-                println!("{} units, {} similar pairs (>= {threshold})", units.len(), pairs.len());
-                for m in &pairs {
-                    println!(
-                        "{:.2}  {}:{}-{} {}  ~  {}:{}-{} {}",
-                        m.scores.combined, m.query.file, m.query.start_line, m.query.end_line, m.query.name,
-                        m.candidate.file, m.candidate.start_line, m.candidate.end_line, m.candidate.name
-                    );
+            let groups = group_pairs(&pairs);
+            if pairs_out {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&pairs)?);
+                } else {
+                    println!("{} units scanned, {} similar pairs (>= {threshold})", units.len(), pairs.len());
+                    for m in &pairs {
+                        println!(
+                            "{:.2}  {}:{}-{} {}  ~  {}:{}-{} {}",
+                            m.scores.combined, m.query.file, m.query.start_line, m.query.end_line, m.query.name,
+                            m.candidate.file, m.candidate.start_line, m.candidate.end_line, m.candidate.name
+                        );
+                    }
                 }
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&groups)?);
+            } else {
+                println!("{} units scanned, {} duplicate groups ({} pairs, score >= {threshold})", units.len(), groups.len(), pairs.len());
+                for (i, g) in groups.iter().enumerate() {
+                    println!("\ngroup {} — {} units, best score {:.2}", i + 1, g.units.len(), g.score);
+                    for u in &g.units {
+                        println!("  {}:{}-{}  {} {}", u.file, u.start_line, u.end_line, u.kind, u.name);
+                    }
+                }
+            }
+            if fail_on_found && !pairs.is_empty() {
+                std::process::exit(1);
             }
         }
         Cmd::Bench { dataset, min_tokens, negatives, file_level, keep_boilerplate, mutations } => {

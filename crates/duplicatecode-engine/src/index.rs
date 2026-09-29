@@ -288,20 +288,39 @@ pub fn units_from_file(root: &std::path::Path, path: &std::path::Path) -> Vec<Un
 }
 
 const SKIP_DIRS: &[&str] =
-    &[".git", "node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".codegraph", ".claude", ".worktrees"];
+    &["node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".codegraph", ".claude", ".worktrees"];
+
+/// Supported source files below `root`, honouring `.gitignore`/`.ignore`, skipping hidden and
+/// vendored directories, and any `excludes` globs (gitignore syntax, e.g. `**/generated/**`).
+pub fn walk_files(root: &std::path::Path, excludes: &[String]) -> Vec<std::path::PathBuf> {
+    let mut b = ignore::WalkBuilder::new(root);
+    b.require_git(false).filter_entry(|e| {
+        e.depth() == 0 || !e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
+    });
+    if !excludes.is_empty() {
+        let mut ob = ignore::overrides::OverrideBuilder::new(root);
+        for g in excludes {
+            let _ = ob.add(&format!("!{g}"));
+        }
+        if let Ok(o) = ob.build() {
+            b.overrides(o);
+        }
+    }
+    b.build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .map(|e| e.into_path())
+        .filter(|p| crate::lang::Lang::from_path(p).is_some())
+        .collect()
+}
 
 /// All units of all supported files below `root`.
 pub fn load_units(root: &std::path::Path) -> Vec<Unit> {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0
-                || !e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
-        })
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .flat_map(|e| units_from_file(root, e.path()))
-        .collect()
+    load_units_with(root, &[])
+}
+
+pub fn load_units_with(root: &std::path::Path, excludes: &[String]) -> Vec<Unit> {
+    walk_files(root, excludes).iter().flat_map(|p| units_from_file(root, p)).collect()
 }
 
 #[cfg(test)]
@@ -350,17 +369,12 @@ mod tests {
 
 /// One whole-file unit per supported file below `root` (for file-level comparisons).
 pub fn load_file_units(root: &std::path::Path) -> Vec<Unit> {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0 || !e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
-        })
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| {
-            let lang = crate::lang::Lang::from_path(e.path())?;
-            let source = std::fs::read_to_string(e.path()).ok()?;
-            let rel = e.path().strip_prefix(root).unwrap_or(e.path()).to_string_lossy().replace('\\', "/");
+    walk_files(root, &[])
+        .iter()
+        .filter_map(|p| {
+            let lang = crate::lang::Lang::from_path(p)?;
+            let source = std::fs::read_to_string(p).ok()?;
+            let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
             crate::units::extract_file_unit(&rel, lang, &source)
         })
         .collect()

@@ -135,3 +135,25 @@ large as the differences between skill/tool versions, so the tag and diff view a
 three runs Haiku + CLI + skill lands at ~58% (MDMApp) and ~45% (OneSales) recall versus 37% / 53% for Sonnet alone and
 49% / 63% for Sonnet + CLI, at roughly a fifth to a third of the cost of Sonnet alone. Note the 30-group cap is itself a ceiling:
 the confirmed pool holds 41 real duplicates in MDMApp.
+
+### Uncapped comparison (same 80-group cap, ~120-call budget for every arm) — final
+
+Pooled confirmed true duplicates: 48 (MDMApp), 35 (OneSales); every group anyone reported was judged blind by reading the code.
+
+| repo | arm | groups | precision true / incl. partial | recall | tokens | cost index (Haiku = 1/3 price) |
+|---|---|---|---|---|---|---|
+| MDMApp | Sonnet, no CLI | 65 | 42% / 65% | 65% | 174k | 522 |
+| MDMApp | Sonnet + CLI + skill | 69 | 62% / 86% | 77% | 72k | 214 |
+| MDMApp | Haiku + CLI + skill | 59 | 73% / 86% | 67% | 102k | **101** |
+| OneSales | Sonnet, no CLI | 64 | 30% / 56% | 54% | 153k | 459 |
+| OneSales | Sonnet + CLI + skill | 80 | 32% / 71% | 66% | 90k | 270 |
+| OneSales | Haiku + CLI + skill | 47 | 38% / 68% | 40% | 85k | **84** |
+| both | tool list only, IDENTICAL+NEAR-COPY, minus `LIKELY-NOISE` | 173 / 278 | (judged subset: 66% / 85% MDMApp, 38% / 64% OneSales) | **88% / 83%** | 0 | 0 |
+
+- With the same budget Haiku + CLI matches Sonnet alone on MDMApp (67% vs 65% recall, better precision) at ~1/5 of the cost;
+  on OneSales it is below (40% vs 54%) at ~1/5.5 of the cost. Sonnet + CLI is best on recall in both.
+- The unfiltered tool list already covers 83–88% of the pool: the agents' job is pruning, and their lower recall comes
+  from what they choose to report (they judge from brief lines and read few members), not from what the tool misses.
+  Precision of the raw list is unknown beyond the judged subset (which is biased towards groups an agent reported).
+- Caveats: judges and finders are the same model family; the pool only contains duplicates someone found; single runs
+  per arm (Haiku varies by +-10 points between runs).

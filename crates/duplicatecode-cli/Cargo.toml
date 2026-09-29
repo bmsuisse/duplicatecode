@@ -1,0 +1,13 @@
+[package]
+name = "duplicatecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI to detect duplicate/similar code in Python and TypeScript"
+
+[[bin]]
+name = "duplicatecode"
+path = "src/main.rs"
+
+[dependencies]
+duplicatecode-engine = { path = "../duplicatecode-engine" }

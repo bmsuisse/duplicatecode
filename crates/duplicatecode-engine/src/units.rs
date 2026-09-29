@@ -164,15 +164,32 @@ impl Ctx<'_> {
                 let value = node.child_by_field_name("value")?;
                 if matches!(value.kind(), "arrow_function" | "function_expression" | "function") {
                     Some(("function", field_name(node)?, node))
+                } else if node.kind() == "variable_declarator"
+                    && matches!(value.kind(), "new_expression" | "call_expression" | "object")
+                    && is_module_level(node)
+                {
+                    // e.g. `export const queryClient = new QueryClient({...})`
+                    Some(("value", field_name(node)?, node))
                 } else {
                     None
                 }
+            }
+            (Lang::Python, "expression_statement") if node.parent().is_some_and(|p| p.kind() == "module") => {
+                let asg = node.named_child(0).filter(|a| a.kind() == "assignment")?;
+                let left = asg.child_by_field_name("left").filter(|l| l.kind() == "identifier")?;
+                let right = asg.child_by_field_name("right")?;
+                matches!(right.kind(), "call" | "dictionary" | "list" | "set")
+                    .then(|| ("value", self.text(left), node))
             }
             _ => None,
         }
     }
 
     fn emit(&mut self, kind: &str, name: String, node: Node) {
+        // one-line module constants (`_DSN = ...`) repeat everywhere and mean nothing
+        if kind == "value" && node.end_position().row - node.start_position().row + 1 < 4 {
+            return;
+        }
         let mut f = Features::default();
         self.collect_features(node, &mut f);
         self.norm_tokens(node, &mut f.tokens, false);
@@ -686,6 +703,13 @@ fn shape_of(node: Node) -> Vec<String> {
         }
     }
     path
+}
+
+/// `const x = ...` / `export const x = ...` directly at the top level of a TS/JS file.
+fn is_module_level(declarator: Node) -> bool {
+    let Some(decl) = declarator.parent().filter(|d| d.kind() == "lexical_declaration") else { return false };
+    let Some(up) = decl.parent() else { return false };
+    up.kind() == "program" || (up.kind() == "export_statement" && up.parent().is_some_and(|p| p.kind() == "program"))
 }
 
 fn is_test_path(file: &str) -> bool {

@@ -88,3 +88,22 @@ by Haiku and Sonnet without seeing the repo. Fraction where the original is foun
 So `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6. About half of
 independent re-implementations are caught; the rest are genuinely different code. The structure-heavy `reimpl`
 profile is not better on this test.
+
+### Head-to-head: LLM-only vs LLM + CLI (MDMApp, OneSales)
+
+Four Sonnet agents (report only, ~80 tool calls, max 30 groups) hunted duplicates in two repos: two with plain
+read/grep, two with this CLI. All distinct groups (82) were then judged blind by independent agents that read the code.
+
+| | groups | true dup. | precision (true / incl. partial) | pooled recall (true) | tool calls |
+|---|---|---|---|---|---|
+| MDMApp, LLM only | 25 | 15 | 60% / 80% | 60% | ~27–33 |
+| MDMApp, with CLI | 26 | 20 | 77% / 92% | 80% | 7 |
+| OneSales, LLM only | 28 | 10 | 36% / 71% | 67% | ~33–42 |
+| OneSales, with CLI | 21 | 10 | 48% / 86% | 67% | 9 |
+
+Only 18 of 82 groups were found by both, so the approaches are complementary. The agents' reports are capped at 30
+groups, so the raw tool is a better measure of recall: `scan --threshold 0.6` (defaults) finds 38 of the 40 judged
+true duplicates (25/25 MDMApp, 13/15 OneSales) and 23 of the 25 that the LLM-only agents found independently.
+What it still misses: a differently-written picker function (same purpose, different code) and a formatFileSize
+variant with different constants. Fixed after this test: tiny same-name exact copies (`min_tokens` 20 -> 8, near-exact
+same-name rule) and multi-line module-level values such as `export const queryClient = new QueryClient({...})`.

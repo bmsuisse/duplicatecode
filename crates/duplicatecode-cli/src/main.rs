@@ -43,7 +43,7 @@ enum Cmd {
         diff: String,
         #[arg(long, default_value_t = 0.4)]
         threshold: f64,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
         #[arg(long, default_value_t = 0.3)]
@@ -69,7 +69,7 @@ enum Cmd {
         exclude: Vec<String>,
         #[arg(long, default_value_t = 0.6)]
         threshold: f64,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
         #[arg(long, default_value_t = 0.3)]
@@ -109,7 +109,7 @@ enum Cmd {
     Bench {
         #[arg(long, default_value = "dataset")]
         dataset: PathBuf,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Unrelated code (e.g. another repo) to measure false alarms against.
         #[arg(long)]

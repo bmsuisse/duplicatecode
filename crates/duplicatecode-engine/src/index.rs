@@ -155,7 +155,7 @@ pub struct MatchOptions {
 
 impl Default for MatchOptions {
     fn default() -> Self {
-        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, min_lines: 6, min_name: 0.3, weights: Weights::default(), skip_tests: false, skip_boilerplate: true }
+        MatchOptions { threshold: 0.5, min_tokens: 8, top_n: 3, min_lines: 6, min_name: 0.3, weights: Weights::default(), skip_tests: false, skip_boilerplate: true }
     }
 }
 
@@ -241,7 +241,12 @@ impl Corpus {
             .filter(|(c, s)| {
                 s.combined >= opts.threshold
                     && s.name >= opts.min_name
-                    && (q.lines.min(c.lines) >= opts.min_lines || (s.name >= 0.8 && s.structural >= 0.95))
+                    // tiny units and module-level values only count as (near-)exact same-name copies
+                    && (!(q.lines.min(c.lines) < opts.min_lines
+                        || q.token_count().min(c.token_count()) < 20
+                        || q.kind == "value"
+                        || c.kind == "value")
+                        || (s.name >= 0.8 && s.structural >= 0.95))
                     // test code only counts when the body is (nearly) identical
                     && (!(q.is_test || c.is_test) || s.structural >= 0.95)
             })
@@ -354,9 +359,9 @@ mod tests {
     #[test]
     fn index_agrees_with_brute_force_above_threshold() {
         let srcs = [
-            "def f(x):\n    y = x + 1\n    return y * 2\n",
-            "def g(x):\n    y = x + 1\n    return y * 3\n",
-            "def h(p):\n    return [i for i in p if i]\n",
+            "def f(x):\n    y = x + 1\n    z = y * 2 + x\n    w = z - y + x * 3\n    return w * 2\n",
+            "def g(x):\n    y = x + 1\n    z = y * 2 + x\n    w = z - y + x * 3\n    return w * 3\n",
+            "def h(p):\n    out = [i for i in p if i]\n    total = sum(out) + len(out)\n    return total\n",
         ];
         let all: Vec<Unit> = srcs.iter().enumerate().flat_map(|(i, s)| units(&format!("{i}.py"), s)).collect();
         let corpus = Corpus::new(all.clone());

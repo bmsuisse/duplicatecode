@@ -3,7 +3,7 @@
 use crate::fingerprint::kgram_hashes;
 use crate::lang::Lang;
 use crate::naming::split_identifier;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::{Node, Parser};
 
 pub const KGRAM: usize = 4;
@@ -24,6 +24,18 @@ pub struct Unit {
     pub callees: BTreeSet<String>,
     #[serde(skip)]
     pub fingerprint: BTreeSet<u64>,
+    /// Looser fingerprint: 2-grams of the same token stream.
+    #[serde(skip)]
+    pub fingerprint2: BTreeSet<u64>,
+    /// Notable literals (numbers, short strings), excluding trivial ones like 0/1/"".
+    #[serde(skip)]
+    pub literals: BTreeSet<String>,
+    /// Called function names plus accessed attribute/member names, lower-cased.
+    #[serde(skip)]
+    pub api: BTreeSet<String>,
+    /// Histogram of syntax-node kinds (bag of structure).
+    #[serde(skip)]
+    pub kinds: BTreeMap<String, u32>,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
 }
@@ -46,6 +58,15 @@ pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     let mut ctx = Ctx { file, lang, src: source.as_bytes(), units: &mut units };
     ctx.walk(tree.root_node());
     units
+}
+
+#[derive(Default)]
+struct Features {
+    tokens: Vec<String>,
+    callees: BTreeSet<String>,
+    literals: BTreeSet<String>,
+    api: BTreeSet<String>,
+    kinds: BTreeMap<String, u32>,
 }
 
 struct Ctx<'a> {
@@ -123,10 +144,11 @@ impl Ctx<'_> {
     }
 
     fn emit(&mut self, kind: &str, name: String, node: Node) {
-        let mut tokens = Vec::new();
-        let mut callees = BTreeSet::new();
-        self.collect(node, &mut tokens, &mut callees);
+        let mut f = Features::default();
+        self.collect(node, &mut f);
+        let Features { tokens, callees, literals, api, kinds } = f;
         let fingerprint = kgram_hashes(&tokens, KGRAM);
+        let fingerprint2 = kgram_hashes(&tokens, 2);
         let name_parts = split_identifier(&name).into_iter().collect();
         self.units.push(Unit {
             file: self.file.to_string(),
@@ -138,11 +160,15 @@ impl Ctx<'_> {
             tokens,
             callees,
             fingerprint,
+            fingerprint2,
+            literals,
+            api,
+            kinds,
             name_parts,
         });
     }
 
-    fn collect(&self, node: Node, tokens: &mut Vec<String>, callees: &mut BTreeSet<String>) {
+    fn collect(&self, node: Node, f: &mut Features) {
         let kind = node.kind();
         if matches!(
             kind,
@@ -164,38 +190,58 @@ impl Ctx<'_> {
         }
         match kind {
             "call" | "call_expression" => {
-                if let Some(f) = node.child_by_field_name("function") {
-                    if let Some(n) = callee_name(f, self.src) {
-                        callees.insert(n.to_lowercase());
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(n) = callee_name(func, self.src) {
+                        let n = n.to_lowercase();
+                        f.api.insert(n.clone());
+                        f.callees.insert(n);
                     }
+                }
+            }
+            "attribute" | "member_expression" => {
+                let field = if kind == "attribute" { "attribute" } else { "property" };
+                if let Some(a) = node.child_by_field_name(field) {
+                    f.api.insert(self.text(a).to_lowercase());
                 }
             }
             _ => {}
         }
         match kind {
             "string" | "template_string" | "string_literal" | "concatenated_string" => {
-                tokens.push("STR".into());
+                f.tokens.push("STR".into());
+                let t = self.text(node);
+                let t = t.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+                if !t.is_empty() && t.len() <= 24 && !t.contains('{') {
+                    f.literals.insert(t.to_lowercase());
+                }
                 return;
             }
             "integer" | "float" | "number" => {
-                tokens.push("NUM".into());
+                f.tokens.push("NUM".into());
+                let t = self.text(node);
+                if !matches!(t.as_str(), "0" | "1" | "2" | "-1") {
+                    f.literals.insert(t);
+                }
                 return;
             }
             "identifier" | "property_identifier" | "shorthand_property_identifier"
             | "shorthand_property_identifier_pattern" | "type_identifier"
             | "private_property_identifier" => {
-                tokens.push("ID".into());
+                f.tokens.push("ID".into());
                 return;
             }
             _ => {}
         }
         if node.child_count() == 0 {
-            tokens.push(kind.to_string());
+            f.tokens.push(kind.to_string());
             return;
+        }
+        if node.is_named() {
+            *f.kinds.entry(kind.to_string()).or_insert(0) += 1;
         }
         for i in 0..node.child_count() {
             if let Some(c) = node.child(i) {
-                self.collect(c, tokens, callees);
+                self.collect(c, f);
             }
         }
     }

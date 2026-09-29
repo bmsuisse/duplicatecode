@@ -5,7 +5,7 @@
 //! same task.
 
 use anyhow::{Context, Result};
-use duplicatecode_engine::index::{score, Scores};
+use duplicatecode_engine::index::{score, Scores, Weights, FEATURE_NAMES, N_FEATURES};
 use duplicatecode_engine::{load_units, Corpus, MatchOptions, Unit};
 use std::collections::HashMap;
 use std::path::Path;
@@ -138,6 +138,7 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>) -> Resul
             println!("{:>11.0}%   (n={total})", 100.0 * top3 as f64 / total.max(1) as f64);
         }
     }
+    pair_report(&combos, &categories, min_tokens);
     if let Some(neg) = negatives {
         sweep(&combos, &categories, neg, min_tokens);
     }
@@ -234,4 +235,133 @@ fn kind(combo: &str) -> &str {
 }
 fn model(combo: &str) -> &str {
     combo.split('/').nth(1).unwrap()
+}
+
+struct Sample {
+    cat: usize,
+    fam: usize,
+    task: u32,
+    x: [f64; N_FEATURES],
+    y: bool,
+}
+
+const FAMILIES: [&str; 2] = ["python", "typescript"];
+
+fn collect_samples(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], min_tokens: usize) -> Vec<Sample> {
+    let mut out = Vec::new();
+    for (cat, (_, pred)) in categories.iter().enumerate() {
+        for (an, aitems) in combos {
+            for (bn, bitems) in combos {
+                if !pred(an, bn) {
+                    continue;
+                }
+                for q in aitems.iter().filter(|i| i.unit.token_count() >= min_tokens) {
+                    let fam = FAMILIES.iter().position(|f| *f == q.unit.lang.family()).unwrap();
+                    for c in bitems.iter().filter(|c| {
+                        c.unit.lang.family() == q.unit.lang.family() && c.unit.token_count() >= min_tokens
+                    }) {
+                        out.push(Sample {
+                            cat,
+                            fam,
+                            task: q.group.parse().unwrap_or(0),
+                            x: score(&q.unit, &c.unit).features(),
+                            y: q.group == c.group,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn sigmoid(z: f64) -> f64 {
+    1.0 / (1.0 + (-z).exp())
+}
+
+/// Class-balanced, L2-regularised logistic regression by batch gradient descent.
+fn fit(samples: &[&Sample]) -> Weights {
+    let pos = samples.iter().filter(|s| s.y).count().max(1) as f64;
+    let neg = samples.iter().filter(|s| !s.y).count().max(1) as f64;
+    let n = samples.len() as f64;
+    let (wp, wn) = (n / (2.0 * pos), n / (2.0 * neg));
+    let mut w = Weights { bias: 0.0, w: [0.0; N_FEATURES] };
+    for _ in 0..2500 {
+        let mut gb = 0.0;
+        let mut gw = [0.0; N_FEATURES];
+        for s in samples {
+            let z = w.bias + s.x.iter().zip(w.w).map(|(x, w)| x * w).sum::<f64>();
+            let err = (sigmoid(z) - if s.y { 1.0 } else { 0.0 }) * if s.y { wp } else { wn };
+            gb += err;
+            for k in 0..N_FEATURES {
+                gw[k] += err * s.x[k];
+            }
+        }
+        w.bias -= 1.0 * gb / n;
+        for k in 0..N_FEATURES {
+            w.w[k] -= 1.0 * (gw[k] / n + 0.001 * w.w[k]);
+        }
+    }
+    w
+}
+
+fn apply(w: &Weights, x: &[f64; N_FEATURES]) -> f64 {
+    sigmoid(w.bias + x.iter().zip(w.w).map(|(x, w)| x * w).sum::<f64>())
+}
+
+/// Fraction of positives scoring above the (1 - fpr) quantile of the negatives.
+fn tpr_at_fpr(scores: &[(f64, bool)], fpr: f64) -> f64 {
+    let mut neg: Vec<f64> = scores.iter().filter(|s| !s.1).map(|s| s.0).collect();
+    let pos: Vec<f64> = scores.iter().filter(|s| s.1).map(|s| s.0).collect();
+    if neg.is_empty() || pos.is_empty() {
+        return f64::NAN;
+    }
+    neg.sort_by(|a, b| a.total_cmp(b));
+    let idx = (((1.0 - fpr) * neg.len() as f64).ceil() as usize).min(neg.len()) - 1;
+    let thr = neg[idx];
+    pos.iter().filter(|p| **p > thr).count() as f64 / pos.len() as f64
+}
+
+/// Recall of same-task pairs at a fixed false-positive rate among different-task pairs.
+fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], min_tokens: usize) {
+    let samples = collect_samples(combos, categories, min_tokens);
+    let refs: Vec<&Sample> = samples.iter().collect();
+    // 2-fold cross-validation over task parity so the fitted score is never scored on tasks it saw.
+    let fit_even = fit(&refs.iter().copied().filter(|s| s.task % 2 == 0).collect::<Vec<_>>());
+    let fit_odd = fit(&refs.iter().copied().filter(|s| s.task % 2 == 1).collect::<Vec<_>>());
+    let cv = |s: &Sample| apply(if s.task % 2 == 0 { &fit_odd } else { &fit_even }, &s.x);
+    let base = |s: &Sample| 0.6 * s.x[0] + 0.2 * s.x[5] + 0.2 * s.x[6];
+
+    for (fam_idx, fam) in FAMILIES.iter().enumerate() {
+        println!("\n== {fam}: recall of same-task pairs at 1% false-positive rate (different-task pairs) ==");
+        print!("{:<30}{:>9}{:>9}", "", "baseline", "fit(cv)");
+        for n in FEATURE_NAMES {
+            print!("{n:>11}");
+        }
+        println!();
+        for (cat, (label, _)) in categories.iter().enumerate() {
+            let sel: Vec<&Sample> = refs.iter().copied().filter(|s| s.cat == cat && s.fam == fam_idx).collect();
+            let col = |f: &dyn Fn(&Sample) -> f64| {
+                let v: Vec<(f64, bool)> = sel.iter().map(|s| (f(s), s.y)).collect();
+                tpr_at_fpr(&v, 0.01)
+            };
+            print!("{label:<30}{:>8.0}%{:>8.0}%", 100.0 * col(&base), 100.0 * col(&cv));
+            for k in 0..N_FEATURES {
+                print!("{:>10.0}%", 100.0 * col(&|s: &Sample| s.x[k]));
+            }
+            println!();
+        }
+    }
+
+    let all = fit(&refs);
+    println!("\nfitted on all data: bias={:.2}", all.bias);
+    for (n, w) in FEATURE_NAMES.iter().zip(all.w) {
+        println!("  {n:<11}{w:>8.2}");
+    }
+    let pooled: Vec<(f64, bool)> = refs.iter().map(|s| (apply(&all, &s.x), s.y)).collect();
+    let mut neg: Vec<f64> = pooled.iter().filter(|p| !p.1).map(|p| p.0).collect();
+    neg.sort_by(|a, b| a.total_cmp(b));
+    for q in [0.99, 0.995, 0.999] {
+        println!("  score threshold at {:.1}% pooled FPR: {:.3}", 100.0 * (1.0 - q), neg[(q * neg.len() as f64) as usize - 1]);
+    }
 }

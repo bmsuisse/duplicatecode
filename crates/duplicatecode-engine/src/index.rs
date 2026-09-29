@@ -1,14 +1,22 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, jaccard};
+use crate::similarity::{containment, cosine, jaccard};
 use crate::units::Unit;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Scores {
-    /// Jaccard of normalized token k-grams.
+    /// Jaccard of normalized token 4-grams.
     pub structural: f64,
-    /// Overlap coefficient of the same k-grams (catches one unit embedded in a bigger one).
+    /// Jaccard of normalized token 2-grams (tolerates reordering).
+    pub loose: f64,
+    /// Overlap coefficient of the 4-grams (one unit embedded in a bigger one).
     pub containment: f64,
+    /// Cosine of syntax-node-kind histograms.
+    pub kinds: f64,
+    /// Jaccard of notable literals; 0 when either side has none.
+    pub literals: f64,
+    /// Jaccard of called and accessed API names.
+    pub api: f64,
     /// Jaccard of identifier subwords in the unit names.
     pub name: f64,
     /// Jaccard of called-function names.
@@ -16,13 +24,49 @@ pub struct Scores {
     pub combined: f64,
 }
 
+impl Scores {
+    /// Feature vector in the order used by [`Weights`].
+    pub fn features(&self) -> [f64; N_FEATURES] {
+        [self.structural, self.loose, self.kinds, self.literals, self.api, self.name, self.callees]
+    }
+}
+
+pub const N_FEATURES: usize = 7;
+pub const FEATURE_NAMES: [&str; N_FEATURES] =
+    ["structural", "loose", "kinds", "literals", "api", "name", "callees"];
+
+/// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
+#[derive(Clone, Copy, Debug)]
+pub struct Weights {
+    pub bias: f64,
+    pub w: [f64; N_FEATURES],
+}
+
+impl Default for Weights {
+    fn default() -> Self {
+        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2] }
+    }
+}
+
 pub fn score(a: &Unit, b: &Unit) -> Scores {
-    let structural = jaccard(&a.fingerprint, &b.fingerprint);
-    let containment = containment(&a.fingerprint, &b.fingerprint);
-    let name = jaccard(&a.name_parts, &b.name_parts);
-    let callees = jaccard(&a.callees, &b.callees);
-    let combined = 0.6 * structural + 0.2 * name + 0.2 * callees;
-    Scores { structural, containment, name, callees, combined }
+    score_with(a, b, &Weights::default())
+}
+
+pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
+    let mut s = Scores {
+        structural: jaccard(&a.fingerprint, &b.fingerprint),
+        loose: jaccard(&a.fingerprint2, &b.fingerprint2),
+        containment: containment(&a.fingerprint, &b.fingerprint),
+        kinds: cosine(&a.kinds, &b.kinds),
+        literals: jaccard(&a.literals, &b.literals),
+        api: jaccard(&a.api, &b.api),
+        name: jaccard(&a.name_parts, &b.name_parts),
+        callees: jaccard(&a.callees, &b.callees),
+        combined: 0.0,
+    };
+    s.combined =
+        weights.bias + s.features().iter().zip(weights.w).map(|(f, w)| f * w).sum::<f64>();
+    s
 }
 
 #[derive(Clone, Debug, serde::Serialize)]

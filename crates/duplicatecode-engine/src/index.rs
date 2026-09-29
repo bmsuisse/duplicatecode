@@ -163,27 +163,28 @@ impl Corpus {
         &self.units
     }
 
-    /// Units sharing at least one k-gram with `q`. Exact for any threshold above the maximum
-    /// score reachable without structural overlap (0.4 with the current weights).
-    fn candidates(&self, q: &Unit) -> Vec<u32> {
-        let mut seen = vec![false; self.units.len()];
-        let mut out = Vec::new();
+    /// Units that could still reach `threshold`. With the default weights the score is
+    /// `w0 * jaccard + (at most rest)`, so a candidate needs `jaccard >= (threshold - rest) / w0`,
+    /// and `jaccard >= s` implies at least `s * |A|` shared k-grams. Exact, not heuristic.
+    fn candidates(&self, q: &Unit, threshold: f64) -> Vec<u32> {
+        let w = Weights::default();
+        let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
+        let min_jaccard = if w.w[0] > 0.0 { ((threshold - rest) / w.w[0]).max(0.0) } else { 0.0 };
+        let min_shared = ((min_jaccard * q.fingerprint.len() as f64).ceil() as u32).max(1);
+        let mut counts: std::collections::HashMap<u32, u32> = Default::default();
         for h in &q.fingerprint {
             for &i in self.postings.get(h).into_iter().flatten() {
-                if !seen[i as usize] {
-                    seen[i as usize] = true;
-                    out.push(i);
-                }
+                *counts.entry(i).or_insert(0) += 1;
             }
         }
-        out
+        counts.into_iter().filter(|(_, c)| *c >= min_shared).map(|(i, _)| i).collect()
     }
 
     /// Best-scoring units for `q`, highest `combined` first, restricted to the same language
     /// family and excluding `q`'s own location.
     pub fn best_for(&self, q: &Unit, opts: MatchOptions) -> Vec<(&Unit, Scores)> {
         let mut hits: Vec<(&Unit, Scores)> = self
-            .candidates(q)
+            .candidates(q, opts.threshold)
             .into_iter()
             .map(|i| &self.units[i as usize])
             .filter(|c| {

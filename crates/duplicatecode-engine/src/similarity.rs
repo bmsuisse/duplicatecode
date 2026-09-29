@@ -30,6 +30,32 @@ pub fn cosine(a: &BTreeMap<String, u32>, b: &BTreeMap<String, u32>) -> f64 {
     dot / (na * nb)
 }
 
+/// Dice coefficient of two multisets: 2 * sum(min counts) / (|A| + |B|).
+pub fn multiset_dice<K: Ord>(a: &BTreeMap<K, u32>, b: &BTreeMap<K, u32>) -> f64 {
+    let total: u32 = a.values().sum::<u32>() + b.values().sum::<u32>();
+    if total == 0 {
+        return 0.0;
+    }
+    let inter: u32 = a.iter().filter_map(|(k, x)| b.get(k).map(|y| *x.min(y))).sum();
+    2.0 * inter as f64 / total as f64
+}
+
+/// 2 * LCS(a, b) / (|a| + |b|): order-aware sequence similarity.
+pub fn lcs_ratio<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    for x in a {
+        let mut cur = vec![0usize; b.len() + 1];
+        for (j, y) in b.iter().enumerate() {
+            cur[j + 1] = if x == y { prev[j] + 1 } else { cur[j].max(prev[j + 1]) };
+        }
+        prev = cur;
+    }
+    2.0 * prev[b.len()] as f64 / (a.len() + b.len()) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +67,9 @@ mod tests {
         assert_eq!(jaccard(&a, &b), 0.5);
         assert_eq!(containment(&a, &b), 1.0);
         assert_eq!(jaccard(&BTreeSet::<u32>::new(), &BTreeSet::new()), 0.0);
+        let m1: BTreeMap<u8, u32> = [(1, 2), (2, 1)].into();
+        let m2: BTreeMap<u8, u32> = [(1, 1), (3, 1)].into();
+        assert_eq!(multiset_dice(&m1, &m2), 0.4);
+        assert_eq!(lcs_ratio(&[1, 2, 3], &[1, 3]), 0.8);
     }
 }

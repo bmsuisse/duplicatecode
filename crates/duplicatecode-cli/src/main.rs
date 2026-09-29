@@ -41,6 +41,15 @@ enum Cmd {
         /// Unrelated code (e.g. another repo) to measure false alarms against.
         #[arg(long)]
         negatives: Option<PathBuf>,
+        /// Compare whole files instead of individual functions/classes.
+        #[arg(long)]
+        file_level: bool,
+        /// Keep constructors/dunder methods in the benchmark (they are filtered by default).
+        #[arg(long)]
+        keep_boilerplate: bool,
+        /// Also measure robustness against mechanical source mutations.
+        #[arg(long)]
+        mutations: bool,
     },
 }
 
@@ -84,7 +93,9 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Bench { dataset, min_tokens, negatives } => bench::run(&dataset, min_tokens, negatives.as_deref())?,
+        Cmd::Bench { dataset, min_tokens, negatives, file_level, keep_boilerplate, mutations } => {
+            bench::run(&dataset, min_tokens, negatives.as_deref(), file_level, keep_boilerplate, mutations)?
+        },
     }
     Ok(())
 }

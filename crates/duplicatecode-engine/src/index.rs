@@ -1,6 +1,6 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, cosine, jaccard};
+use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice};
 use crate::units::Unit;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -21,19 +21,39 @@ pub struct Scores {
     pub name: f64,
     /// Jaccard of called-function names.
     pub callees: f64,
+    /// Multiset Dice of normalized statements (order-insensitive).
+    pub stmt_exact: f64,
+    /// Multiset Dice of coarse statement shapes.
+    pub stmt_shape: f64,
+    /// Order-aware alignment (LCS) of statement shapes.
+    pub stmt_lcs: f64,
     pub combined: f64,
 }
 
 impl Scores {
     /// Feature vector in the order used by [`Weights`].
     pub fn features(&self) -> [f64; N_FEATURES] {
-        [self.structural, self.loose, self.kinds, self.literals, self.api, self.name, self.callees]
+        [
+            self.structural,
+            self.loose,
+            self.kinds,
+            self.literals,
+            self.api,
+            self.name,
+            self.callees,
+            self.stmt_exact,
+            self.stmt_shape,
+            self.stmt_lcs,
+        ]
     }
 }
 
-pub const N_FEATURES: usize = 7;
+pub const N_FEATURES: usize = 10;
 pub const FEATURE_NAMES: [&str; N_FEATURES] =
-    ["structural", "loose", "kinds", "literals", "api", "name", "callees"];
+    [
+    "structural", "loose", "kinds", "literals", "api", "name", "callees", "stmt_exact", "stmt_shape",
+    "stmt_lcs",
+];
 
 /// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +64,7 @@ pub struct Weights {
 
 impl Default for Weights {
     fn default() -> Self {
-        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2] }
+        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0] }
     }
 }
 
@@ -62,6 +82,9 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
         api: jaccard(&a.api, &b.api),
         name: jaccard(&a.name_parts, &b.name_parts),
         callees: jaccard(&a.callees, &b.callees),
+        stmt_exact: multiset_dice(&a.stmts_exact, &b.stmts_exact),
+        stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
+        stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
         combined: 0.0,
     };
     s.combined =
@@ -105,11 +128,13 @@ pub struct MatchOptions {
     pub min_tokens: usize,
     /// Max matches reported per query unit.
     pub top_n: usize,
+    /// Ignore constructors, dunder methods and similar boilerplate (as query and as candidate).
+    pub skip_boilerplate: bool,
 }
 
 impl Default for MatchOptions {
     fn default() -> Self {
-        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3 }
+        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, skip_boilerplate: true }
     }
 }
 
@@ -163,6 +188,7 @@ impl Corpus {
             .map(|i| &self.units[i as usize])
             .filter(|c| {
                 c.token_count() >= opts.min_tokens
+                    && !(opts.skip_boilerplate && c.boilerplate)
                     && c.lang.family() == q.lang.family()
                     && !same_place(q, c)
             })
@@ -179,7 +205,7 @@ impl Corpus {
 pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Vec<Match> {
     queries
         .iter()
-        .filter(|q| q.token_count() >= opts.min_tokens)
+        .filter(|q| q.token_count() >= opts.min_tokens && !(opts.skip_boilerplate && q.boilerplate))
         .flat_map(|q| {
             corpus.best_for(q, opts).into_iter().map(|(c, scores)| Match {
                 query: q.into(),
@@ -252,7 +278,7 @@ mod tests {
         ];
         let all: Vec<Unit> = srcs.iter().enumerate().flat_map(|(i, s)| units(&format!("{i}.py"), s)).collect();
         let corpus = Corpus::new(all.clone());
-        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10 };
+        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, skip_boilerplate: false };
         for q in &all {
             let brute = all
                 .iter()
@@ -261,4 +287,22 @@ mod tests {
             assert_eq!(corpus.best_for(q, opts).len(), brute);
         }
     }
+}
+
+/// One whole-file unit per supported file below `root` (for file-level comparisons).
+pub fn load_file_units(root: &std::path::Path) -> Vec<Unit> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            e.depth() == 0 || !e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
+        })
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let lang = crate::lang::Lang::from_path(e.path())?;
+            let source = std::fs::read_to_string(e.path()).ok()?;
+            let rel = e.path().strip_prefix(root).unwrap_or(e.path()).to_string_lossy().replace('\\', "/");
+            crate::units::extract_file_unit(&rel, lang, &source)
+        })
+        .collect()
 }

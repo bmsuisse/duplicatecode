@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use duplicatecode_engine::index::{score, Scores, Weights, FEATURE_NAMES, N_FEATURES};
-use duplicatecode_engine::{load_units, Corpus, MatchOptions, Unit};
+use duplicatecode_engine::{load_file_units, load_units, Corpus, MatchOptions, Unit};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -38,7 +38,7 @@ fn strict_targets(dataset: &Path) -> Result<HashMap<String, String>> {
     Ok(m)
 }
 
-fn load_combos(dataset: &Path) -> Result<Combos> {
+fn load_combos(dataset: &Path, file_level: bool, keep_boilerplate: bool) -> Result<Combos> {
     let targets = strict_targets(dataset)?;
     let mut combos = Combos::new();
     for (set, dir) in [("strict", "impls"), ("loose", "impls-loose"), ("hard", "impls-hard")] {
@@ -48,13 +48,16 @@ fn load_combos(dataset: &Path) -> Result<Combos> {
         for mdir in models {
             let model = mdir.file_name().unwrap().to_string_lossy().to_string();
             let mut items = Vec::new();
-            for u in load_units(&mdir) {
+            for u in if file_level { load_file_units(&mdir) } else { load_units(&mdir) } {
                 let group = if set == "strict" {
                     let base = u.file.rsplit('/').next().unwrap_or(&u.file);
                     targets.get(base).cloned()
                 } else {
                     Some(u.file[..2].to_string())
                 };
+                if !keep_boilerplate && u.boilerplate {
+                    continue;
+                }
                 if let Some(group) = group {
                     items.push(Item { group, unit: u });
                 }
@@ -74,8 +77,9 @@ const SCORERS: [(&str, Pick); 5] = [
     ("combined", |s| s.combined),
 ];
 
-pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>) -> Result<()> {
-    let combos = load_combos(dataset)?;
+pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_level: bool, keep_boilerplate: bool, mutations: bool) -> Result<()> {
+    let combos = load_combos(dataset, file_level, keep_boilerplate)?;
+    println!("level: {}", if file_level { "whole files" } else { "functions/classes" });
     for (name, items) in &combos {
         println!("loaded {name}: {} units", items.len());
     }
@@ -139,6 +143,9 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>) -> Resul
         }
     }
     pair_report(&combos, &categories, min_tokens);
+    if mutations {
+        mutation_report(dataset, &combos, &categories, min_tokens)?;
+    }
     if let Some(neg) = negatives {
         sweep(&combos, &categories, neg, min_tokens);
     }
@@ -150,7 +157,7 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>) -> Resul
 fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &Path, min_tokens: usize) {
     use rayon::prelude::*;
     let corpus = Corpus::new(load_units(neg));
-    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1 };
+    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, skip_boilerplate: true };
     println!("\n== threshold sweep vs. negatives corpus {} ({} units) ==", neg.display(), corpus.units().len());
 
     // best combined score per dataset unit against the negatives (+ which corpus unit)
@@ -330,7 +337,8 @@ fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], m
     let fit_even = fit(&refs.iter().copied().filter(|s| s.task % 2 == 0).collect::<Vec<_>>());
     let fit_odd = fit(&refs.iter().copied().filter(|s| s.task % 2 == 1).collect::<Vec<_>>());
     let cv = |s: &Sample| apply(if s.task % 2 == 0 { &fit_odd } else { &fit_even }, &s.x);
-    let base = |s: &Sample| 0.6 * s.x[0] + 0.2 * s.x[5] + 0.2 * s.x[6];
+    let bw = Weights::default();
+    let base = |s: &Sample| s.x.iter().zip(bw.w).map(|(x, w)| x * w).sum::<f64>();
 
     for (fam_idx, fam) in FAMILIES.iter().enumerate() {
         println!("\n== {fam}: recall of same-task pairs at 1% false-positive rate (different-task pairs) ==");
@@ -364,4 +372,70 @@ fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], m
     for q in [0.99, 0.995, 0.999] {
         println!("  score threshold at {:.1}% pooled FPR: {:.3}", 100.0 * (1.0 - q), neg[(q * neg.len() as f64) as usize - 1]);
     }
+}
+
+/// Robustness to mechanical rewrites: how well does a unit still match its own mutated copy?
+/// The threshold is the score above which only 1% of different-task pairs fall.
+fn mutation_report(
+    dataset: &Path,
+    combos: &Combos,
+    categories: &[(&str, fn(&str, &str) -> bool)],
+    min_tokens: usize,
+) -> Result<()> {
+    use duplicatecode_engine::mutate::{apply, Mutation};
+    use duplicatecode_engine::{extract_units, Lang};
+
+    let samples = collect_samples(combos, categories, min_tokens);
+    let bw = Weights::default();
+    let mut neg: Vec<f64> = samples
+        .iter()
+        .filter(|s| !s.y)
+        .map(|s| s.x.iter().zip(bw.w).map(|(x, w)| x * w).sum::<f64>())
+        .collect();
+    neg.sort_by(|a, b| a.total_cmp(b));
+    let thr = neg[((0.99 * neg.len() as f64) as usize).min(neg.len() - 1)];
+
+    let mut files = Vec::new();
+    for dir in ["impls", "impls-loose", "impls-hard"] {
+        for e in walkdir::WalkDir::new(dataset.join(dir)).into_iter().filter_map(Result::ok) {
+            if e.file_type().is_file() {
+                if let Some(lang) = Lang::from_path(e.path()) {
+                    files.push((lang, std::fs::read_to_string(e.path())?, e.path().display().to_string()));
+                }
+            }
+        }
+    }
+    println!("\n== mutation robustness: original vs mutated copy (threshold {thr:.2} = 1% FPR on different-task pairs) ==");
+    println!("{:<18}{:>6}{:>10}{:>9}{:>9}{:>10}{:>10}{:>7}{:>12}", "mutation", "n", "recall", "@0.5", "@0.7", "combined", "structure", "name", "stmt_exact");
+    for m in Mutation::ALL {
+        let (mut n, mut hit, mut h5, mut h7) = (0usize, 0usize, 0usize, 0usize);
+        let mut sums = [0.0f64; 4];
+        for (lang, src, path) in &files {
+            let orig = extract_units(path, *lang, src);
+            let mutated = extract_units(path, *lang, &apply(m, *lang, src));
+            if orig.len() != mutated.len() {
+                continue;
+            }
+            for (o, t) in orig.iter().zip(&mutated) {
+                if o.token_count() < min_tokens || o.boilerplate {
+                    continue;
+                }
+                let sc = score(o, t);
+                n += 1;
+                hit += (sc.combined > thr) as usize;
+                h5 += (sc.combined >= 0.5) as usize;
+                h7 += (sc.combined >= 0.7) as usize;
+                sums[0] += sc.combined;
+                sums[1] += sc.structural;
+                sums[2] += sc.name;
+                sums[3] += sc.stmt_exact;
+            }
+        }
+        let d = n.max(1) as f64;
+        println!(
+            "{:<18}{:>6}{:>9.0}%{:>8.0}%{:>8.0}%{:>10.2}{:>10.2}{:>7.2}{:>12.2}",
+            m.name(), n, 100.0 * hit as f64 / d, 100.0 * h5 as f64 / d, 100.0 * h7 as f64 / d, sums[0] / d, sums[1] / d, sums[2] / d, sums[3] / d
+        );
+    }
+    Ok(())
 }

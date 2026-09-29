@@ -16,6 +16,11 @@ pub struct ReviewOptions {
     pub min_lines: u32,
     pub skip_tests: bool,
     pub max_groups: usize,
+    pub offset: usize,
+    /// One line per group instead of the detailed block (to scan hundreds of groups cheaply).
+    pub brief: bool,
+    /// Only this tier (`identical`, `near`, `similar`).
+    pub tier: Option<String>,
     pub preview_lines: usize,
     pub weights: Weights,
 }
@@ -115,13 +120,21 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(b.2.members.len().cmp(&a.2.members.len())));
 
+    if let Some(t) = &o.tier {
+        let want = match t.as_str() {
+            "identical" => Tier::Identical,
+            "near" => Tier::NearCopy,
+            _ => Tier::Similar,
+        };
+        ranked.retain(|r| r.0 == want);
+    }
     let total = ranked.len();
     let mut out = String::new();
     out.push_str(&format!(
         "# duplicatecode review — {} units scanned, {} candidate groups (showing {})\n\n",
         units.len(),
         total,
-        total.min(o.max_groups)
+        total.saturating_sub(o.offset).min(o.max_groups)
     ));
     out.push_str(
         "Tiers: IDENTICAL = same normalized body (renames/comments/logging ignored); NEAR-COPY = very similar; \
@@ -134,7 +147,7 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         counts(Tier::NearCopy),
         counts(Tier::Similar)
     ));
-    for (i, (tier, score, g)) in ranked.iter().take(o.max_groups).enumerate() {
+    for (i, (tier, score, g)) in ranked.iter().enumerate().skip(o.offset).take(o.max_groups) {
         let us: Vec<&Unit> = g.members.iter().map(|&m| &units[m]).collect();
         let same_name = us.iter().all(|u| u.name == us[0].name);
         let mut hints: Vec<&str> = Vec::new();
@@ -155,6 +168,25 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         let files: BTreeSet<&str> = us.iter().map(|u| u.file.as_str()).collect();
         if files.len() == 1 {
             hints.push("same file");
+        }
+        if o.brief {
+            let mem: Vec<String> = us
+                .iter()
+                .take(3)
+                .map(|u| format!("{}:{}-{}", u.file, u.start_line, u.end_line))
+                .collect();
+            out.push_str(&format!(
+                "G{} {} {:.2} x{} {}{}: {}{}\n",
+                i + 1,
+                tier.label(),
+                score,
+                us.len(),
+                if same_name { format!("`{}` ", us[0].name) } else { format!("`{}`~`{}` ", us[0].name, us[1].name) },
+                if hints.is_empty() { String::new() } else { format!("[{}]", hints.join(",")) },
+                mem.join(" | "),
+                if us.len() > 3 { format!(" | +{}", us.len() - 3) } else { String::new() }
+            ));
+            continue;
         }
         out.push_str(&format!(
             "## G{} [{}] score {:.2} · {} units{}\n",
@@ -179,10 +211,11 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         out.push_str(&preview(a, src, o.preview_lines));
         out.push('\n');
     }
-    if total > o.max_groups {
+    if total > o.offset + o.max_groups {
         out.push_str(&format!(
-            "… {} more groups not shown (raise --max-groups, or raise --threshold to narrow).\n",
-            total - o.max_groups
+            "… {} more groups not shown: continue with `--offset {}` (add `--brief` for one line per group; `--tier identical|near|similar` filters).\n",
+            total - o.offset - o.max_groups,
+            o.offset + o.max_groups
         ));
     }
     out

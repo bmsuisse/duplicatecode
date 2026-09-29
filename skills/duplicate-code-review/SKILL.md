@@ -9,25 +9,26 @@ description: Find duplicated or near-duplicated code (Python, TypeScript/TSX) in
 
 Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build: `cargo build --release`).
 
-## Procedure (follow in order; ~10–25 tool calls is normal)
+## Procedure (follow in order; ~15–40 tool calls is normal — use your budget, a repo usually has 50–300 groups)
 
-1. **Scan with `review`** (compact markdown: ranked groups, code preview, what differs):
+1. **Get the full map cheaply with `--brief`** (one line per group, ranked IDENTICAL > NEAR-COPY > SIMILAR):
    ```
-   duplicatecode review <folder> [<folder2> …] --max-groups 60
+   duplicatecode review <folder> [<folder2> …] --brief --skip-tests --max-groups 150
    ```
-   - Monorepo: pass the package folders, or the root. `.gitignore`, `node_modules`, hidden dirs, generated files (`*.gen.*`, `generated/`, `*.d.ts`) are skipped automatically. Add `--exclude '<glob>'` (repeatable) for anything else vendored.
-   - Groups are tiered: **IDENTICAL** (same normalized body) > **NEAR-COPY** (score ≥ 0.6) > **SIMILAR**. Each group lists its members as `file:start-end kind name`, the signals of the closest pair, `differs:` (literals / calls only in one side) and a preview of the first member.
-2. **Triage every IDENTICAL and NEAR-COPY group; sample the top of SIMILAR.** For each group decide, reading code if the preview is not enough (`duplicatecode show path/to/file.py:10-40` prints numbered lines, or use your Read tool):
+   The header tells you how many groups exist per tier; page with `--offset N` until you have seen **every IDENTICAL and NEAR-COPY group** (`--tier identical` / `--tier near` filter). Each line: `G<n> TIER score x<members> `name` [hints]: file:lines | file:lines …`.
+   - Monorepo: pass the package folders or the root. `.gitignore`, `node_modules`, hidden dirs and generated files (`*.gen.*`, `generated/`, `*.d.ts`) are skipped automatically; add `--exclude '<glob>'` (repeatable) for other vendored code.
+2. **Open the promising groups in detail** (preview + signals + what differs) without `--brief`, e.g. `review <folder> --offset <n-1> --max-groups 1`, or just read the members (`duplicatecode show path/to/file.py:10-40`, or your Read tool). A group is promising when the members share a name, or a non-trivial body, or the same job. Skip groups that look like the noise patterns below without opening them.
+3. **Decide per group** after reading every member:
    - **real duplicate** – would be one shared function/component/hook (copy-paste, or same job written slightly differently);
    - **partial** – shares a substantial sub-part worth extracting;
-   - **noise** – similar only by convention → drop it (see below).
-3. **Widen for recall** (do this; the first pass is precision-leaning):
+   - **noise** – similar only by convention → drop it.
+4. **Widen for recall** (the first pass is precision-leaning):
    ```
-   duplicatecode review <folder> --threshold 0.35 --min-name 0 --min-lines 3 --max-groups 80
+   duplicatecode review <folder> --brief --threshold 0.35 --min-name 0 --min-lines 3 --max-groups 150
    ```
-   Skim only groups you have not seen. `--min-name 0` also lists look-alikes with unrelated names (finds renamed re-implementations, but noisier).
-4. **Look for what a static tool cannot see** (same purpose, different code): pick 3–6 common helper families (format/parse/normalize/slug/debounce/retry/pagination/date/currency/auth/fetch-wrapper/query-client/logger setup…), `grep -rn "function <family>\|def <family>"` across the folder, and compare implementations by reading. Also check **module-level setup blocks** repeated across apps/packages (e.g. client/config construction).
-5. **Report** (see format below). Verify each reported group by reading every member — never report from scores alone.
+   Skim only groups you have not seen. `--min-name 0` also lists look-alikes with unrelated names (finds renamed re-implementations, noisier). Then repeat step 1 without `--skip-tests` if tests matter (identical helpers copied between test files are real but low priority).
+5. **Look for what a static tool cannot see** (same purpose, different code): pick 4–8 common helper families (format/parse/normalize/slug/debounce/retry/pagination/date/currency/size/auth/fetch-wrapper/query-client/logger setup/pick/label…), `grep -rn "function <family>\|def <family>"` across the folder, and compare implementations by reading. Also check **module-level setup blocks** repeated across apps/packages (client/config construction).
+6. **Report** (format below). Verify each reported group by reading every member — never report from scores alone.
 
 ## Deciding what is noise (very common false positives)
 

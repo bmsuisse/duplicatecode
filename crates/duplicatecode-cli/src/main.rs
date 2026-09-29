@@ -122,6 +122,15 @@ enum Cmd {
         skip_tests: bool,
         #[arg(long, default_value_t = 40)]
         max_groups: usize,
+        /// Skip the first N groups (paging).
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// One line per group (scan hundreds cheaply, then open the interesting ones).
+        #[arg(long)]
+        brief: bool,
+        /// Only one tier: identical | near | similar.
+        #[arg(long)]
+        tier: Option<String>,
         #[arg(long, default_value_t = 8)]
         preview_lines: usize,
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
@@ -316,7 +325,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Review { embed, paths, exclude, threshold, min_name, min_lines, skip_tests, max_groups, preview_lines, profile } => {
+        Cmd::Review { embed, paths, exclude, threshold, min_name, min_lines, skip_tests, max_groups, offset, brief, tier, preview_lines, profile } => {
             let mut units = Vec::new();
             let mut src = std::collections::HashMap::new();
             for p in &paths {
@@ -330,7 +339,7 @@ fn main() -> Result<()> {
                 }
             }
             embed.apply(&mut units)?;
-            let o = review::ReviewOptions { threshold, min_name, min_lines, skip_tests, max_groups, preview_lines, weights: embed.weights(profile.weights()) };
+            let o = review::ReviewOptions { threshold, min_name, min_lines, skip_tests, max_groups, offset, brief, tier, preview_lines, weights: embed.weights(profile.weights()) };
             print!("{}", review::run(units, &src, &o));
         }
         Cmd::EmbedTest { embed, names } => {

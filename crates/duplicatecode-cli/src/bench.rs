@@ -5,7 +5,7 @@
 //! same task.
 
 use anyhow::{Context, Result};
-use duplicatecode_engine::index::{score, Scores, Weights, FEATURE_NAMES, N_FEATURES};
+use duplicatecode_engine::index::{score, score_with, Scores, Weights, FEATURE_NAMES, N_FEATURES};
 use duplicatecode_engine::{load_file_units, load_units, Corpus, MatchOptions, Unit};
 use std::collections::HashMap;
 use std::path::Path;
@@ -157,7 +157,7 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_lev
 fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &Path, min_tokens: usize) {
     use rayon::prelude::*;
     let corpus = Corpus::new(load_units(neg));
-    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_boilerplate: true };
+    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_tests: false, skip_boilerplate: true };
     println!("\n== threshold sweep vs. negatives corpus {} ({} units) ==", neg.display(), corpus.units().len());
 
     // best combined score per dataset unit against the negatives (+ which corpus unit)
@@ -436,6 +436,85 @@ fn mutation_report(
             "{:<18}{:>6}{:>9.0}%{:>8.0}%{:>8.0}%{:>10.2}{:>10.2}{:>7.2}{:>12.2}",
             m.name(), n, 100.0 * hit as f64 / d, 100.0 * h5 as f64 / d, 100.0 * h7 as f64 / d, sums[0] / d, sums[1] / d, sums[2] / d, sums[3] / d
         );
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct Case {
+    id: u32,
+    repo_root: String,
+    file: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+/// Does a hand-written model re-implementation of a real repo function get matched to the original?
+/// Also counts alarms on *other* code (what a maintainer would see as noise).
+pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
+    use duplicatecode_engine::{extract_units, Lang};
+    use std::collections::BTreeMap;
+
+    let cases: Vec<Case> = serde_json::from_str(&std::fs::read_to_string(cases_path)?)?;
+    let mut corpora: BTreeMap<String, Corpus> = BTreeMap::new();
+    for c in &cases {
+        corpora.entry(c.repo_root.clone()).or_insert_with(|| Corpus::new(load_units(Path::new(&c.repo_root))));
+    }
+    let mut models: Vec<_> = std::fs::read_dir(impls)?.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    models.sort();
+
+    struct Row {
+        model: String,
+        // per setting: (original's score if it would be reported, best other score)
+        per_setting: Vec<(Option<f64>, f64)>,
+    }
+    let settings: [(&str, Weights, f64); 3] = [
+        ("copies, min-name 0.3", Weights::copies(), 0.3),
+        ("copies, min-name 0", Weights::copies(), 0.0),
+        ("reimpl, min-name 0", Weights::default(), 0.0),
+    ];
+    let mut rows: Vec<Row> = Vec::new();
+    let mut missing = 0;
+    for mdir in &models {
+        let model = mdir.file_name().unwrap().to_string_lossy().to_string();
+        for c in &cases {
+            let Some(path) = ["py", "ts", "tsx"].iter().map(|e| mdir.join(format!("{}.{e}", c.id))).find(|p| p.exists()) else {
+                missing += 1;
+                continue;
+            };
+            let Some(lang) = Lang::from_path(&path) else { continue };
+            let src = std::fs::read_to_string(&path)?;
+            let mut units = extract_units("new", lang, &src);
+            units.sort_by_key(|u| std::cmp::Reverse(u.token_count()));
+            let Some(q) = units.first() else { continue };
+            let corpus = &corpora[&c.repo_root];
+            let is_orig = |u: &Unit| u.file == c.file && u.start_line <= c.end_line && c.start_line <= u.end_line;
+            let mut per_setting = Vec::new();
+            for (_, w, min_name) in &settings {
+                let opts = MatchOptions { threshold: 0.0, min_tokens: 20, top_n: 8, min_lines: 0, min_name: *min_name, weights: *w, skip_tests: false, skip_boilerplate: false };
+                let hits = corpus.best_for(q, opts);
+                let orig = hits.iter().find(|(u, _)| is_orig(u)).map(|(_, s)| s.combined);
+                let other = hits.iter().find(|(u, _)| !is_orig(u)).map(|(_, s)| s.combined).unwrap_or(0.0);
+                per_setting.push((orig, other));
+            }
+            let _ = score_with;
+            rows.push(Row { model: model.clone(), per_setting });
+        }
+    }
+    println!("{} (case, model) re-implementations evaluated ({missing} missing)", rows.len());
+    for (k, (label, _, _)) in settings.iter().enumerate() {
+        println!("\n== {label} ==");
+        println!("{:<10}{:>5}{:>12}{:>12}{:>12}{:>16}{:>16}", "model", "n", "orig@0.5", "orig@0.6", "orig@0.7", "other-alarm@0.6", "other-alarm@0.7");
+        let mut names: Vec<&str> = rows.iter().map(|r| r.model.as_str()).collect();
+        names.dedup();
+        let mut groups: Vec<(&str, Vec<&Row>)> = names.iter().map(|m| (*m, rows.iter().filter(|r| r.model == *m).collect())).collect();
+        groups.push(("all", rows.iter().collect()));
+        for (m, rs) in groups {
+            let n = rs.len().max(1) as f64;
+            let det = |t: f64| 100.0 * rs.iter().filter(|r| r.per_setting[k].0.is_some_and(|s| s >= t)).count() as f64 / n;
+            let alarm = |t: f64| 100.0 * rs.iter().filter(|r| r.per_setting[k].1 >= t).count() as f64 / n;
+            println!("{m:<10}{:>5}{:>11.0}%{:>11.0}%{:>11.0}%{:>15.0}%{:>15.0}%", rs.len(), det(0.5), det(0.6), det(0.7), alarm(0.6), alarm(0.7));
+        }
     }
     Ok(())
 }

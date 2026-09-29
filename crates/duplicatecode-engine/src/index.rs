@@ -145,6 +145,8 @@ pub struct MatchOptions {
     /// Minimum name similarity: in real code, look-alikes with unrelated names are almost always
     /// convention-driven boilerplate. Set to 0 to hunt for renamed re-implementations.
     pub min_name: f64,
+    /// Ignore test code entirely (as query and candidate).
+    pub skip_tests: bool,
     /// Scoring weights (see [`Weights::default`] and [`Weights::copies`]).
     pub weights: Weights,
     /// Ignore constructors, dunder methods and similar boilerplate (as query and as candidate).
@@ -153,7 +155,7 @@ pub struct MatchOptions {
 
 impl Default for MatchOptions {
     fn default() -> Self {
-        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, min_lines: 6, min_name: 0.3, weights: Weights::default(), skip_boilerplate: true }
+        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, min_lines: 6, min_name: 0.3, weights: Weights::default(), skip_tests: false, skip_boilerplate: true }
     }
 }
 
@@ -231,6 +233,7 @@ impl Corpus {
             .filter(|c| {
                 c.token_count() >= opts.min_tokens
                     && !(opts.skip_boilerplate && c.boilerplate)
+                    && !(opts.skip_tests && c.is_test)
                     && c.lang.family() == q.lang.family()
                     && !same_place(q, c)
             })
@@ -256,6 +259,7 @@ pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Ve
         .filter(|q| {
             q.token_count() >= opts.min_tokens
                 && !(opts.skip_boilerplate && q.boilerplate)
+                && !(opts.skip_tests && q.is_test)
         })
         .flat_map(|q| {
             corpus.best_for(q, opts).into_iter().map(|(c, scores)| Match {
@@ -356,7 +360,7 @@ mod tests {
         ];
         let all: Vec<Unit> = srcs.iter().enumerate().flat_map(|(i, s)| units(&format!("{i}.py"), s)).collect();
         let corpus = Corpus::new(all.clone());
-        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_boilerplate: false };
+        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_tests: false, skip_boilerplate: false };
         for q in &all {
             let brute = all
                 .iter()

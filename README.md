@@ -14,7 +14,9 @@ checked against existing source.
 cargo build --release
 duplicatecode units src/                              # list extracted units
 git diff origin/main | duplicatecode diff --repo .    # check added code against the repo
-duplicatecode scan <repo> --cross-file                 # find similar units inside one repo
+duplicatecode scan packages/ services/api           # find duplicate groups inside one or more folders (monorepo)
+duplicatecode scan . --exclude '**/generated/**' --skip-tests --fail-on-found   # CI-style run
+duplicatecode scan . --pairs --json                  # machine-readable pairs instead of groups
 duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives <other repo>]
 ```
 
@@ -62,3 +64,10 @@ Self-scans of three internal repositories (Python + TypeScript), 189 pairs judge
   These numbers are partly in-sample (weights and filters were chosen on the same pairs) — re-judge a fresh sample
   before trusting them. A structure-heavy `--profile reimpl` exists for renamed re-implementations
   (use with `--min-name 0`) but has no real-repo precision data yet.
+
+### Fresh held-out check (copies profile, threshold 0.6)
+
+A third, untouched sample of 57 pairs (nothing was tuned on it): 30% true duplicates, 47% incl. partial
+(OneSales 0/24, MDMApp 11/24, CCMT2 6/9 true). The 50%/76% above was optimistic because it was measured on the
+pairs used to choose the weights. Test code is about half of the noise but also holds real copies
+(25% true either way), so it is kept by default; `--skip-tests` drops it.

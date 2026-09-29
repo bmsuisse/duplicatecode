@@ -81,6 +81,9 @@ enum Cmd {
         /// Ignore units shorter than this many lines.
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
+        /// Ignore test code (about half of the noise in the judged repos, but also some real copies).
+        #[arg(long)]
+        skip_tests: bool,
         /// Only report pairs whose units are in different files.
         #[arg(long)]
         cross_file: bool,
@@ -92,6 +95,15 @@ enum Cmd {
         fail_on_found: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Evaluate detection of LLM re-implementations of real repository functions.
+    ReimplEval {
+        /// JSON list of {id, repo_root, file, start_line, end_line, lang}.
+        #[arg(long)]
+        cases: PathBuf,
+        /// Directory with one sub-folder per model, each holding `<id>.py|.ts` files.
+        #[arg(long)]
+        impls: PathBuf,
     },
     /// Evaluate the detector on the LLM-implementation benchmark dataset.
     Bench {
@@ -220,7 +232,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Scan { paths, exclude, threshold, min_tokens, min_name, profile, min_lines, cross_file, pairs_out, fail_on_found, json } => {
+        Cmd::Scan { paths, exclude, threshold, min_tokens, min_name, profile, min_lines, skip_tests, cross_file, pairs_out, fail_on_found, json } => {
             let mut units = Vec::new();
             for p in &paths {
                 for mut u in load_units_with(p, &exclude) {
@@ -231,7 +243,7 @@ fn main() -> Result<()> {
                 }
             }
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, weights: profile.weights(), ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, skip_tests, weights: profile.weights(), ..Default::default() };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units
@@ -276,6 +288,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::ReimplEval { cases, impls } => bench::reimpl_eval(&cases, &impls)?,
         Cmd::Bench { dataset, min_tokens, negatives, file_level, keep_boilerplate, mutations } => {
             bench::run(&dataset, min_tokens, negatives.as_deref(), file_level, keep_boilerplate, mutations)?
         },

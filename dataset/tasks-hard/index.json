@@ -1,0 +1,302 @@
+[
+  {
+    "id": "01",
+    "slug": "retry-with-backoff",
+    "language": "python",
+    "title": "Retry a callable with exponential backoff"
+  },
+  {
+    "id": "02",
+    "slug": "slugify",
+    "language": "python",
+    "title": "Convert text to a URL slug"
+  },
+  {
+    "id": "03",
+    "slug": "deep-merge-dicts",
+    "language": "python",
+    "title": "Recursive dictionary deep merge"
+  },
+  {
+    "id": "04",
+    "slug": "chunk-list",
+    "language": "python",
+    "title": "Split a sequence into chunks"
+  },
+  {
+    "id": "05",
+    "slug": "lru-cache-class",
+    "language": "python",
+    "title": "Fixed-capacity LRU cache"
+  },
+  {
+    "id": "06",
+    "slug": "checksum-iban-validate",
+    "language": "python",
+    "title": "Validate IBAN-style account numbers (mod 97)"
+  },
+  {
+    "id": "07",
+    "slug": "email-normalize-validate",
+    "language": "python",
+    "title": "Email validation and normalisation"
+  },
+  {
+    "id": "08",
+    "slug": "phone-normalize",
+    "language": "python",
+    "title": "Phone number normalisation to E.164-like form"
+  },
+  {
+    "id": "09",
+    "slug": "group-by-key",
+    "language": "python",
+    "title": "Group items by computed key"
+  },
+  {
+    "id": "10",
+    "slug": "flatten-tree",
+    "language": "python",
+    "title": "Flatten a tree of nodes"
+  },
+  {
+    "id": "11",
+    "slug": "diff-records",
+    "language": "python",
+    "title": "Diff two flat records"
+  },
+  {
+    "id": "12",
+    "slug": "build-query-string",
+    "language": "python",
+    "title": "Build a URL query string"
+  },
+  {
+    "id": "13",
+    "slug": "format-currency",
+    "language": "python",
+    "title": "Currency formatting with thousands separators"
+  },
+  {
+    "id": "14",
+    "slug": "sql-filter-builder",
+    "language": "python",
+    "title": "Parameterised SQL WHERE clause builder"
+  },
+  {
+    "id": "15",
+    "slug": "csv-row-mapper",
+    "language": "python",
+    "title": "Map CSV rows to typed records"
+  },
+  {
+    "id": "16",
+    "slug": "paginate",
+    "language": "python",
+    "title": "Pagination helper"
+  },
+  {
+    "id": "17",
+    "slug": "format-period-label",
+    "language": "python",
+    "title": "Date period labels"
+  },
+  {
+    "id": "18",
+    "slug": "record-survivorship-merge",
+    "language": "python",
+    "title": "Master-data record merge with survivorship rules"
+  },
+  {
+    "id": "19",
+    "slug": "token-bucket-limiter",
+    "language": "python",
+    "title": "Token bucket rate limiter"
+  },
+  {
+    "id": "20",
+    "slug": "parse-duration",
+    "language": "python",
+    "title": "Parse human duration strings"
+  },
+  {
+    "id": "21",
+    "slug": "company-name-normalizer",
+    "language": "python",
+    "title": "Normalise organisation names for duplicate matching"
+  },
+  {
+    "id": "22",
+    "slug": "topological-sort",
+    "language": "python",
+    "title": "Topological sort of dependency graph"
+  },
+  {
+    "id": "23",
+    "slug": "mask-sensitive-values",
+    "language": "python",
+    "title": "Mask sensitive values in nested data"
+  },
+  {
+    "id": "24",
+    "slug": "add-business-days",
+    "language": "python",
+    "title": "Add business days to a date"
+  },
+  {
+    "id": "25",
+    "slug": "row-validator",
+    "language": "python",
+    "title": "Declarative row validation"
+  },
+  {
+    "id": "26",
+    "slug": "debounce-function",
+    "language": "typescript",
+    "title": "Debounce a function"
+  },
+  {
+    "id": "27",
+    "slug": "throttle-function",
+    "language": "typescript",
+    "title": "Throttle a function"
+  },
+  {
+    "id": "28",
+    "slug": "retry-async-backoff",
+    "language": "typescript",
+    "title": "Retry an async function with backoff"
+  },
+  {
+    "id": "29",
+    "slug": "deep-merge-objects",
+    "language": "typescript",
+    "title": "Deep merge plain objects"
+  },
+  {
+    "id": "30",
+    "slug": "group-items-by",
+    "language": "typescript",
+    "title": "Group and count items by key"
+  },
+  {
+    "id": "31",
+    "slug": "lru-cache-map",
+    "language": "typescript",
+    "title": "Generic LRU cache"
+  },
+  {
+    "id": "32",
+    "slug": "chunk-array",
+    "language": "typescript",
+    "title": "Chunk an array"
+  },
+  {
+    "id": "33",
+    "slug": "query-string-builder",
+    "language": "typescript",
+    "title": "Query string builder"
+  },
+  {
+    "id": "34",
+    "slug": "format-number-compact",
+    "language": "typescript",
+    "title": "Compact number formatting"
+  },
+  {
+    "id": "35",
+    "slug": "where-clause-builder",
+    "language": "typescript",
+    "title": "Parameterised SQL WHERE builder"
+  },
+  {
+    "id": "36",
+    "slug": "flatten-tree-nodes",
+    "language": "typescript",
+    "title": "Flatten a node tree"
+  },
+  {
+    "id": "37",
+    "slug": "diff-two-objects",
+    "language": "typescript",
+    "title": "Diff two flat objects"
+  },
+  {
+    "id": "38",
+    "slug": "mod97-checksum-validator",
+    "language": "typescript",
+    "title": "Mod-97 account number validation"
+  },
+  {
+    "id": "39",
+    "slug": "pagination-page-list",
+    "language": "typescript",
+    "title": "Pagination page list with ellipses"
+  },
+  {
+    "id": "40",
+    "slug": "parse-csv-line",
+    "language": "typescript",
+    "title": "Parse a CSV text into rows"
+  },
+  {
+    "id": "41",
+    "slug": "relative-time-label",
+    "language": "typescript",
+    "title": "Relative time label"
+  },
+  {
+    "id": "42",
+    "slug": "typed-event-emitter",
+    "language": "typescript",
+    "title": "Typed event emitter"
+  },
+  {
+    "id": "43",
+    "slug": "concurrency-limited-map",
+    "language": "typescript",
+    "title": "Async map with concurrency limit"
+  },
+  {
+    "id": "44",
+    "slug": "memoize-with-ttl",
+    "language": "typescript",
+    "title": "Memoize with TTL"
+  },
+  {
+    "id": "45",
+    "slug": "multi-key-sorter",
+    "language": "typescript",
+    "title": "Multi-key sort comparator"
+  },
+  {
+    "id": "46",
+    "slug": "use-debounced-value",
+    "language": "typescript",
+    "title": "React hook: useDebouncedValue"
+  },
+  {
+    "id": "47",
+    "slug": "use-local-storage-state",
+    "language": "typescript",
+    "title": "React hook: useLocalStorageState"
+  },
+  {
+    "id": "48",
+    "slug": "status-badge-component",
+    "language": "typescript",
+    "title": "StatusBadge component"
+  },
+  {
+    "id": "49",
+    "slug": "paged-table-component",
+    "language": "typescript",
+    "title": "PagedTable component"
+  },
+  {
+    "id": "50",
+    "slug": "search-box-component",
+    "language": "typescript",
+    "title": "Debounced SearchBox component"
+  }
+]

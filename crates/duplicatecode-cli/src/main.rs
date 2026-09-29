@@ -2,7 +2,7 @@ mod bench;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use duplicatecode_engine::{diff, find_matches, load_units, units_from_file, MatchOptions};
+use duplicatecode_engine::{diff, find_matches, Corpus, load_units, units_from_file, MatchOptions};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -38,6 +38,9 @@ enum Cmd {
         dataset: PathBuf,
         #[arg(long, default_value_t = 20)]
         min_tokens: usize,
+        /// Unrelated code (e.g. another repo) to measure false alarms against.
+        #[arg(long)]
+        negatives: Option<PathBuf>,
     },
 }
 
@@ -63,7 +66,7 @@ fn main() -> Result<()> {
                     ranges.iter().any(|&(s, e)| s <= u.end_line && u.start_line <= e)
                 }));
             }
-            let corpus = load_units(&repo);
+            let corpus = Corpus::new(load_units(&repo));
             let opts = MatchOptions { threshold, min_tokens, ..Default::default() };
             let matches = find_matches(&queries, &corpus, opts);
             if json {
@@ -81,7 +84,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Bench { dataset, min_tokens } => bench::run(&dataset, min_tokens)?,
+        Cmd::Bench { dataset, min_tokens, negatives } => bench::run(&dataset, min_tokens, negatives.as_deref())?,
     }
     Ok(())
 }

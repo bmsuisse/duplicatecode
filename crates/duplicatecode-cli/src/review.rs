@@ -115,7 +115,11 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
             } else {
                 Tier::Similar
             };
-            (tier, best.combined, g)
+            let noisy = {
+                let us: Vec<&Unit> = g.members.iter().map(|&m| &units[m]).collect();
+                noise_reason(&us, &best).is_some()
+            };
+            (tier, best.combined - if noisy { 10.0 } else { 0.0 }, g)
         })
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(b.2.members.len().cmp(&a.2.members.len())));
@@ -147,7 +151,8 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         counts(Tier::NearCopy),
         counts(Tier::Similar)
     ));
-    for (i, (tier, score, g)) in ranked.iter().enumerate().skip(o.offset).take(o.max_groups) {
+    for (i, (tier, raw_score, g)) in ranked.iter().enumerate().skip(o.offset).take(o.max_groups) {
+        let score = &(if *raw_score < -5.0 { raw_score + 10.0 } else { *raw_score });
         let us: Vec<&Unit> = g.members.iter().map(|&m| &units[m]).collect();
         let same_name = us.iter().all(|u| u.name == us[0].name);
         let mut hints: Vec<&str> = Vec::new();
@@ -164,6 +169,10 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         }
         if same_name {
             hints.push("same name");
+        }
+        let noise = noise_reason(&us, &g.edges[0].2);
+        if noise.is_some() {
+            hints.push("LIKELY-NOISE");
         }
         let files: BTreeSet<&str> = us.iter().map(|u| u.file.as_str()).collect();
         if files.len() == 1 {
@@ -207,7 +216,11 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
             "signals (closest pair): structure {:.2}, statements {:.2}, name {:.2}, literals {:.2}, api {:.2}\n",
             s.structural, s.stmt_exact, s.name, s.literals, s.api
         ));
+        if let Some(n) = noise {
+            out.push_str(&format!("likely noise: {n}\n"));
+        }
         out.push_str(&format!("differs: {}\n", differences(a, b)));
+        out.push_str(&diff_view(a, b, src));
         out.push_str(&preview(a, src, o.preview_lines));
         out.push('\n');
     }
@@ -219,6 +232,19 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         ));
     }
     out
+}
+
+/// Cheap pattern detection for the top false-alarm families, so a reader can skip them quickly.
+fn noise_reason(us: &[&Unit], best: &duplicatecode_engine::index::Scores) -> Option<&'static str> {
+    let names_differ = best.name < 0.8;
+    let all_le = |n: u32| us.iter().all(|u| u.lines <= n);
+    if names_differ && best.structural >= 0.95 && best.api >= 0.99 && all_le(15) {
+        return Some("parametrized twin: same shape and calls, differs only in names/literals (likely per-entity wrapper)");
+    }
+    if names_differ && us.iter().all(|u| u.shape_seq.len() <= 3 && u.callees.len() <= 2) {
+        return Some("thin delegator: few statements, one or two calls");
+    }
+    None
 }
 
 fn trunc(s: &str) -> String {
@@ -257,6 +283,46 @@ fn differences(a: &Unit, b: &Unit) -> String {
     } else {
         parts.join("; ")
     }
+}
+
+/// Line diff of the two closest members (changed lines with 1 line of context), so a reader can
+/// judge "copy with small edits" vs "different code" without opening the files.
+fn diff_view(a: &Unit, b: &Unit, src: &HashMap<String, PathBuf>) -> String {
+    let text = |u: &Unit| -> Option<String> {
+        let t = std::fs::read_to_string(src.get(&u.file)?).ok()?;
+        let lines: Vec<&str> = t.lines().collect();
+        let (s, e) = ((u.start_line as usize).saturating_sub(1), (u.end_line as usize).min(lines.len()));
+        Some(lines[s.min(e)..e].iter().map(|l| l.trim_end().to_string() + "\n").collect())
+    };
+    let (Some(ta), Some(tb)) = (text(a), text(b)) else { return String::new() };
+    let d = similar::TextDiff::configure().algorithm(similar::Algorithm::Myers).diff_lines(&ta, &tb);
+    let ratio = d.ratio();
+    if ratio >= 0.9999 {
+        return "diff (first vs second): textually identical\n".to_string();
+    }
+    let mut out = format!("diff (first vs second, {:.0}% of lines equal):\n```diff\n", ratio * 100.0);
+    let mut shown = 0;
+    'outer: for group in d.grouped_ops(1) {
+        for op in group {
+            for ch in d.iter_changes(&op) {
+                let sign = match ch.tag() {
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                let l: String = ch.value().trim_end().chars().take(100).collect();
+                out.push_str(&format!("{sign}{l}\n"));
+                shown += 1;
+                if shown >= 22 {
+                    out.push_str("… (diff truncated)\n");
+                    break 'outer;
+                }
+            }
+        }
+        out.push_str("…\n");
+    }
+    out.push_str("```\n");
+    out
 }
 
 fn preview(u: &Unit, src: &HashMap<String, PathBuf>, n: usize) -> String {

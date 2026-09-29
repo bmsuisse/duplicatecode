@@ -17,7 +17,8 @@ Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build
    ```
    The header tells you how many groups exist per tier; page with `--offset N` until you have seen **every IDENTICAL and NEAR-COPY group** (`--tier identical` / `--tier near` filter). Each line: `G<n> TIER score x<members> `name` [hints]: file:lines | file:lines …`.
    - Monorepo: pass the package folders or the root. `.gitignore`, `node_modules`, hidden dirs and generated files (`*.gen.*`, `generated/`, `*.d.ts`) are skipped automatically; add `--exclude '<glob>'` (repeatable) for other vendored code.
-2. **Open the promising groups in detail** (preview + signals + what differs) without `--brief`, e.g. `review <folder> --offset <n-1> --max-groups 1`, or just read the members (`duplicatecode show path/to/file.py:10-40`, or your Read tool). A group is promising when the members share a name, or a non-trivial body, or the same job. Skip groups that look like the noise patterns below without opening them.
+   - Lines tagged `LIKELY-NOISE` (parametrized twins that differ only in names/literals, thin delegators) are sorted last inside their tier; skip them unless the members share a name *and* are not trivial wrappers.
+2. **Open the promising groups in detail** (preview, signals, what differs, and a line **diff of the two closest members** — small diff = copy with small edits, large diff = only similar in shape) without `--brief`, e.g. `review <folder> --offset <n-1> --max-groups 1`, or just read the members (`duplicatecode show path/to/file.py:10-40`, or your Read tool). A group is promising when the members share a name, or a non-trivial body, or the same job. Skip groups that look like the noise patterns below without opening them.
 3. **Decide per group** after reading every member:
    - **real duplicate** – would be one shared function/component/hook (copy-paste, or same job written slightly differently);
    - **partial** – shares a substantial sub-part worth extracting;
@@ -32,7 +33,7 @@ Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build
 
 ## Deciding what is noise (very common false positives)
 
-Drop unless the bodies are truly identical *and* it is non-trivial:
+Drop unless the bodies are truly identical *and* it is non-trivial (the tool already tags the commonest shapes `LIKELY-NOISE`):
 - thin API/fetch/react-query wrappers that differ only by endpoint, key or entity;
 - per-entity CRUD/list endpoints, repository one-liners that delegate to `fetch_all`/`fetch_one`;
 - DTO / model / TypedDict / Pydantic classes with similar field lists;

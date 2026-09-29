@@ -127,3 +127,11 @@ r1 = first skill (top-60 groups only); r2 = skill with `--brief` paging. Read: o
 recall (70% vs 41%) and precision at about a third of the cost; on OneSales it is at par with Sonnet alone on recall
 (50% vs 56%, one group) with better-or-equal precision at about a fifth of the cost, but below Sonnet + CLI. Broadening (r2)
 buys recall at the price of precision on OneSales. Small samples; judges and finders are the same model family.
+
+Round 3 (after `LIKELY-NOISE` tagging and the line-diff view; hard cap 30 groups): MDMApp 29 groups, precision 69% / 86%,
+recall 51%, 69k tokens; OneSales 12 groups, precision 75% / 83%, recall 42%, 89k tokens. Recall pooled against 41 (MDMApp)
+and 19 (OneSales) confirmed duplicates. Run-to-run variation of Haiku (59–63% / 51% on MDMApp, 42–47% on OneSales) is as
+large as the differences between skill/tool versions, so the tag and diff view are not shown to help measurably; averaged over
+three runs Haiku + CLI + skill lands at ~58% (MDMApp) and ~45% (OneSales) recall versus 37% / 53% for Sonnet alone and
+49% / 63% for Sonnet + CLI, at roughly a fifth to a third of the cost of Sonnet alone. Note the 30-group cap is itself a ceiling:
+the confirmed pool holds 41 real duplicates in MDMApp.

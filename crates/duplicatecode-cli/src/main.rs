@@ -41,7 +41,7 @@ enum Cmd {
         /// Diff file, or `-` for stdin.
         #[arg(long, default_value = "-")]
         diff: String,
-        #[arg(long, default_value_t = 0.6)]
+        #[arg(long, default_value_t = 0.4)]
         threshold: f64,
         #[arg(long, default_value_t = 20)]
         min_tokens: usize,

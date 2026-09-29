@@ -504,16 +504,31 @@ pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
     println!("{} (case, model) re-implementations evaluated ({missing} missing)", rows.len());
     for (k, (label, _, _)) in settings.iter().enumerate() {
         println!("\n== {label} ==");
-        println!("{:<10}{:>5}{:>12}{:>12}{:>12}{:>16}{:>16}", "model", "n", "orig@0.5", "orig@0.6", "orig@0.7", "other-alarm@0.6", "other-alarm@0.7");
+        let ths = [0.3, 0.4, 0.5, 0.6, 0.7];
+        print!("{:<10}{:>5}  original found (score >= t):", "model", "n");
+        for t in ths {
+            print!("{t:>6.1}");
+        }
+        print!("   | other-code alarm (score >= t):");
+        for t in ths {
+            print!("{t:>6.1}");
+        }
+        println!();
         let mut names: Vec<&str> = rows.iter().map(|r| r.model.as_str()).collect();
         names.dedup();
         let mut groups: Vec<(&str, Vec<&Row>)> = names.iter().map(|m| (*m, rows.iter().filter(|r| r.model == *m).collect())).collect();
         groups.push(("all", rows.iter().collect()));
         for (m, rs) in groups {
             let n = rs.len().max(1) as f64;
-            let det = |t: f64| 100.0 * rs.iter().filter(|r| r.per_setting[k].0.is_some_and(|s| s >= t)).count() as f64 / n;
-            let alarm = |t: f64| 100.0 * rs.iter().filter(|r| r.per_setting[k].1 >= t).count() as f64 / n;
-            println!("{m:<10}{:>5}{:>11.0}%{:>11.0}%{:>11.0}%{:>15.0}%{:>15.0}%", rs.len(), det(0.5), det(0.6), det(0.7), alarm(0.6), alarm(0.7));
+            print!("{m:<10}{:>5}  {:<30}", rs.len(), "");
+            for t in ths {
+                print!("{:>5.0}%", 100.0 * rs.iter().filter(|r| r.per_setting[k].0.is_some_and(|s| s >= t)).count() as f64 / n);
+            }
+            print!("   | {:<30}", "");
+            for t in ths {
+                print!("{:>5.0}%", 100.0 * rs.iter().filter(|r| r.per_setting[k].1 >= t).count() as f64 / n);
+            }
+            println!();
         }
     }
     Ok(())

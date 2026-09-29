@@ -71,3 +71,20 @@ A third, untouched sample of 57 pairs (nothing was tuned on it): 30% true duplic
 (OneSales 0/24, MDMApp 11/24, CCMT2 6/9 true). The 50%/76% above was optimistic because it was measured on the
 pairs used to choose the weights. Test code is about half of the noise but also holds real copies
 (25% true either way), so it is kept by default; `--skip-tests` drops it.
+
+### Re-implementations of existing helpers (`reimpl-eval`)
+
+42 real helper functions from the three repos were described neutrally (no names/code) and re-implemented from scratch
+by Haiku and Sonnet without seeing the repo. Fraction where the original is found (copies profile) and where the best
+*other* match also crosses the threshold:
+
+| threshold | Sonnet found | Haiku found | both | other-code alarm |
+|---|---|---|---|---|
+| 0.3 | 67% | 60% | 63% | 21% |
+| 0.4 | 62% | 33% | 48% | 8% |
+| 0.5 | 45% | 14% | 30% | 1% |
+| 0.6 | 24% | 5% | 14% | 0% |
+
+So `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6. About half of
+independent re-implementations are caught; the rest are genuinely different code. The structure-heavy `reimpl`
+profile is not better on this test.

@@ -128,13 +128,19 @@ pub struct MatchOptions {
     pub min_tokens: usize,
     /// Max matches reported per query unit.
     pub top_n: usize,
+    /// Units shorter than this many lines only match when they are near-exact copies with the
+    /// same name (tiny wrappers around different endpoints are otherwise the top false alarm).
+    pub min_lines: u32,
+    /// Minimum name similarity: in real code, look-alikes with unrelated names are almost always
+    /// convention-driven boilerplate. Set to 0 to hunt for renamed re-implementations.
+    pub min_name: f64,
     /// Ignore constructors, dunder methods and similar boilerplate (as query and as candidate).
     pub skip_boilerplate: bool,
 }
 
 impl Default for MatchOptions {
     fn default() -> Self {
-        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, skip_boilerplate: true }
+        MatchOptions { threshold: 0.5, min_tokens: 20, top_n: 3, min_lines: 6, min_name: 0.3, skip_boilerplate: true }
     }
 }
 
@@ -194,7 +200,13 @@ impl Corpus {
                     && !same_place(q, c)
             })
             .map(|c| (c, score(q, c)))
-            .filter(|(_, s)| s.combined >= opts.threshold)
+            .filter(|(c, s)| {
+                s.combined >= opts.threshold
+                    && s.name >= opts.min_name
+                    && (q.lines.min(c.lines) >= opts.min_lines || (s.name >= 0.8 && s.structural >= 0.95))
+                    // test code only counts when the body is (nearly) identical
+                    && (!(q.is_test || c.is_test) || s.structural >= 0.95)
+            })
             .collect();
         hits.sort_by(|a, b| b.1.combined.total_cmp(&a.1.combined));
         hits.truncate(opts.top_n);
@@ -206,7 +218,10 @@ impl Corpus {
 pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Vec<Match> {
     queries
         .iter()
-        .filter(|q| q.token_count() >= opts.min_tokens && !(opts.skip_boilerplate && q.boilerplate))
+        .filter(|q| {
+            q.token_count() >= opts.min_tokens
+                && !(opts.skip_boilerplate && q.boilerplate)
+        })
         .flat_map(|q| {
             corpus.best_for(q, opts).into_iter().map(|(c, scores)| Match {
                 query: q.into(),
@@ -218,7 +233,15 @@ pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Ve
 }
 
 /// Extract units from a single file (language from the extension); empty if unsupported/unreadable.
+fn is_generated(path: &std::path::Path) -> bool {
+    let p = path.to_string_lossy();
+    p.contains(".gen.") || p.contains("/generated/") || p.contains("/__generated__/") || p.ends_with(".d.ts")
+}
+
 pub fn units_from_file(root: &std::path::Path, path: &std::path::Path) -> Vec<Unit> {
+    if is_generated(path) {
+        return Vec::new();
+    }
     let Some(lang) = crate::lang::Lang::from_path(path) else {
         return Vec::new();
     };
@@ -264,7 +287,7 @@ mod tests {
         corpus.extend(units("c.py", c));
         let corpus = Corpus::new(corpus);
         let q = units("b.py", b);
-        let m = find_matches(&q, &corpus, MatchOptions { min_tokens: 5, ..Default::default() });
+        let m = find_matches(&q, &corpus, MatchOptions { min_tokens: 5, min_lines: 0, min_name: 0.0, ..Default::default() });
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].candidate.name, "total");
         assert!(m[0].scores.structural > 0.99);
@@ -279,7 +302,7 @@ mod tests {
         ];
         let all: Vec<Unit> = srcs.iter().enumerate().flat_map(|(i, s)| units(&format!("{i}.py"), s)).collect();
         let corpus = Corpus::new(all.clone());
-        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, skip_boilerplate: false };
+        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, min_lines: 0, min_name: 0.0, skip_boilerplate: false };
         for q in &all {
             let brute = all
                 .iter()

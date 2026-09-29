@@ -29,6 +29,12 @@ enum Cmd {
         threshold: f64,
         #[arg(long, default_value_t = 20)]
         min_tokens: usize,
+        /// Minimum name similarity (0 = also report look-alikes with unrelated names).
+        #[arg(long, default_value_t = 0.3)]
+        min_name: f64,
+        /// Ignore units shorter than this many lines.
+        #[arg(long, default_value_t = 6)]
+        min_lines: u32,
         #[arg(long)]
         json: bool,
     },
@@ -39,6 +45,12 @@ enum Cmd {
         threshold: f64,
         #[arg(long, default_value_t = 20)]
         min_tokens: usize,
+        /// Minimum name similarity (0 = also report look-alikes with unrelated names).
+        #[arg(long, default_value_t = 0.3)]
+        min_name: f64,
+        /// Ignore units shorter than this many lines.
+        #[arg(long, default_value_t = 6)]
+        min_lines: u32,
         /// Only report pairs whose units are in different files.
         #[arg(long)]
         cross_file: bool,
@@ -73,7 +85,7 @@ fn main() -> Result<()> {
                 println!("{}:{}-{} {} {} ({} tokens)", u.file, u.start_line, u.end_line, u.kind, u.name, u.token_count());
             }
         }
-        Cmd::Diff { repo, diff, threshold, min_tokens, json } => {
+        Cmd::Diff { repo, diff, threshold, min_tokens, min_name, min_lines, json } => {
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -89,7 +101,7 @@ fn main() -> Result<()> {
                 }));
             }
             let corpus = Corpus::new(load_units(&repo));
-            let opts = MatchOptions { threshold, min_tokens, ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, ..Default::default() };
             let matches = find_matches(&queries, &corpus, opts);
             if json {
                 println!("{}", serde_json::to_string_pretty(&matches)?);
@@ -106,10 +118,10 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Scan { path, threshold, min_tokens, cross_file, json } => {
+        Cmd::Scan { path, threshold, min_tokens, min_name, min_lines, cross_file, json } => {
             let units = load_units(&path);
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 1, ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, top_n: 1, min_name, min_lines, ..Default::default() };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units

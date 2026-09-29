@@ -45,8 +45,13 @@ pub struct Unit {
     /// Statement shapes in source order (for order-aware alignment).
     #[serde(skip)]
     pub shape_seq: Vec<u64>,
-    /// Constructors, dunder methods and similar: high similarity there is expected noise.
+    /// Constructors, dunder methods, field-only classes and similar: high similarity there is
+    /// expected noise.
     pub boilerplate: bool,
+    /// Lives in test code (path or name convention).
+    pub is_test: bool,
+    /// Number of source lines.
+    pub lines: u32,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
 }
@@ -185,7 +190,8 @@ impl Ctx<'_> {
             *stmts_shape.entry(sh).or_insert(0) += 1;
             shape_seq.push(sh);
         }
-        let boilerplate = is_boilerplate(&name);
+        let boilerplate = is_boilerplate(&name) || (kind == "class" && self.fields_only(node));
+        let is_test = is_test_path(self.file) || name.starts_with("test_") || name.starts_with("Test");
         let name_parts = split_identifier(&name).into_iter().collect();
         self.units.push(Unit {
             file: self.file.to_string(),
@@ -205,8 +211,36 @@ impl Ctx<'_> {
             stmts_shape,
             shape_seq,
             boilerplate,
+            is_test,
+            lines: (node.end_position().row - node.start_position().row + 1) as u32,
             name_parts,
         });
+    }
+
+    /// A class that only declares fields (data model / DTO): no methods, no logic.
+    fn fields_only(&self, class: Node) -> bool {
+        let Some(body) = class.child_by_field_name("body") else { return false };
+        let mut fields = 0;
+        for i in 0..body.named_child_count() {
+            let Some(m) = body.named_child(i as u32) else { continue };
+            match m.kind() {
+                "comment" | "pass_statement" | "decorator" => {}
+                "expression_statement" => match m.named_child(0).map(|e| e.kind()) {
+                    Some("assignment" | "string" | "ellipsis" | "concatenated_string") => fields += 1,
+                    _ => return false,
+                },
+                "public_field_definition" | "property_signature" => {
+                    if m.child_by_field_name("value").is_some_and(|v| {
+                        matches!(v.kind(), "arrow_function" | "function_expression" | "function")
+                    }) {
+                        return false;
+                    }
+                    fields += 1;
+                }
+                _ => return false,
+            }
+        }
+        fields > 0
     }
 
     // ---- normalization -------------------------------------------------------------------
@@ -654,6 +688,16 @@ fn shape_of(node: Node) -> Vec<String> {
     path
 }
 
+fn is_test_path(file: &str) -> bool {
+    let f = file.replace('\\', "/");
+    let base = f.rsplit('/').next().unwrap_or(&f);
+    f.split('/').any(|c| matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec"))
+        || base.starts_with("test_")
+        || base == "conftest.py"
+        || base.ends_with("_test.py")
+        || [".test.", ".spec."].iter().any(|m| base.contains(m))
+}
+
 fn is_boilerplate(name: &str) -> bool {
     (name.starts_with("__") && name.ends_with("__")) || name == "constructor"
 }
@@ -737,6 +781,18 @@ mod tests {
         let ts2 = extract_units("b.ts", Lang::TypeScript, "function f(a: number) { return a * 2; }");
         assert_eq!(ts1[0].tokens, ts2[0].tokens);
         assert_eq!(ts1[0].shape_seq, ts2[0].shape_seq);
+    }
+
+    #[test]
+    fn field_only_classes_are_boilerplate_and_tests_are_flagged() {
+        let dto = "class Item(BaseModel):\n    id: int\n    name: str\n    price: float = 0.0\n";
+        let u = extract_units("x.py", Lang::Python, dto);
+        assert!(u[0].boilerplate);
+        let logic = "class Item:\n    id: int\n\n    def total(self):\n        return self.id\n";
+        assert!(!extract_units("x.py", Lang::Python, logic)[0].boilerplate);
+        let t = extract_units("tests/test_a.py", Lang::Python, "def helper():\n    return 1\n");
+        assert!(t[0].is_test);
+        assert!(!extract_units("src/a.py", Lang::Python, "def helper():\n    return 1\n")[0].is_test);
     }
 
     #[test]

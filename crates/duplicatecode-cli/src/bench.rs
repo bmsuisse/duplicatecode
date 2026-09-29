@@ -292,7 +292,7 @@ fn fit(samples: &[&Sample]) -> Weights {
     let neg = samples.iter().filter(|s| !s.y).count().max(1) as f64;
     let n = samples.len() as f64;
     let (wp, wn) = (n / (2.0 * pos), n / (2.0 * neg));
-    let mut w = Weights { bias: 0.0, w: [0.0; N_FEATURES] };
+    let mut w = Weights { bias: 0.0, w: [0.0; N_FEATURES], name_floor: 0.5 };
     for _ in 0..2500 {
         let mut gb = 0.0;
         let mut gw = [0.0; N_FEATURES];

@@ -1,6 +1,7 @@
 //! duplicatecode engine: static (LLM-free) duplicate/similar code detection.
 
 pub mod diff;
+pub mod embed;
 pub mod fingerprint;
 pub mod index;
 pub mod lang;

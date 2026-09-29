@@ -60,12 +60,14 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] =
 pub struct Weights {
     pub bias: f64,
     pub w: [f64; N_FEATURES],
+    /// Embedding cosine at/below which two names count as unrelated (scaled to 0 at the floor, 1 at 1.0).
+    pub name_floor: f64,
 }
 
 impl Default for Weights {
     /// Re-implementation profile: mostly structure, so renamed rewrites still match.
     fn default() -> Self {
-        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0] }
+        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0], name_floor: 0.5 }
     }
 }
 
@@ -75,12 +77,25 @@ impl Weights {
     /// identical statements and shared literals separate real copies from convention-driven
     /// look-alikes (CRUD endpoints, thin wrappers) far better than raw token overlap.
     pub fn copies() -> Self {
-        Weights { bias: 0.0, w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0] }
+        Weights { bias: 0.0, w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0], name_floor: 0.5 }
     }
 }
 
 pub fn score(a: &Unit, b: &Unit) -> Scores {
     score_with(a, b, &Weights::default())
+}
+
+/// Lexical subword overlap, or — when both names have embeddings — the better of that and the
+/// calibrated embedding cosine (so `pickName` ~ `pickLocalizedLabel` can still register).
+fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
+    let lexical = jaccard(&a.name_parts, &b.name_parts);
+    match (&a.name_vec, &b.name_vec) {
+        (Some(x), Some(y)) if x.len() == y.len() => {
+            let cos: f64 = x.iter().zip(y.iter()).map(|(p, q)| (*p as f64) * (*q as f64)).sum();
+            lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0))
+        }
+        _ => lexical,
+    }
 }
 
 pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
@@ -91,7 +106,7 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
         kinds: cosine(&a.kinds, &b.kinds),
         literals: jaccard(&a.literals, &b.literals),
         api: jaccard(&a.api, &b.api),
-        name: jaccard(&a.name_parts, &b.name_parts),
+        name: name_similarity(a, b, weights.name_floor),
         callees: jaccard(&a.callees, &b.callees),
         stmt_exact: multiset_dice(&a.stmts_exact, &b.stmts_exact),
         stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
@@ -169,6 +184,8 @@ pub struct Corpus {
     postings: std::collections::HashMap<u64, Vec<u32>>,
     /// name subword -> units (used when a minimum name similarity is required)
     name_postings: std::collections::HashMap<String, Vec<u32>>,
+    /// distinct name embeddings with their units (empty unless embeddings are enabled)
+    sem_names: Vec<(std::sync::Arc<[f32]>, Vec<u32>)>,
 }
 
 impl Corpus {
@@ -185,7 +202,14 @@ impl Corpus {
                 name_postings.entry(part.clone()).or_default().push(i as u32);
             }
         }
-        Corpus { units, postings, name_postings }
+        let mut by_name: std::collections::HashMap<&str, (std::sync::Arc<[f32]>, Vec<u32>)> = Default::default();
+        for (i, u) in units.iter().enumerate() {
+            if let Some(v) = &u.name_vec {
+                by_name.entry(u.name.as_str()).or_insert_with(|| (v.clone(), vec![])).1.push(i as u32);
+            }
+        }
+        let sem_names = by_name.into_values().collect();
+        Corpus { units, postings, name_postings, sem_names }
     }
 
     pub fn units(&self) -> &[Unit] {
@@ -205,6 +229,20 @@ impl Corpus {
                     if !seen[i as usize] {
                         seen[i as usize] = true;
                         out.push(i);
+                    }
+                }
+            }
+            if let Some(qv) = &q.name_vec {
+                // semantically close names that share no subword
+                let cutoff = opts.weights.name_floor + 0.1;
+                for (v, ids) in &self.sem_names {
+                    if v.len() == qv.len() && qv.iter().zip(v.iter()).map(|(a, b)| (*a as f64) * (*b as f64)).sum::<f64>() >= cutoff {
+                        for &i in ids {
+                            if !seen[i as usize] {
+                                seen[i as usize] = true;
+                                out.push(i);
+                            }
+                        }
                     }
                 }
             }

@@ -52,6 +52,9 @@ pub struct Unit {
     pub is_test: bool,
     /// Number of source lines.
     pub lines: u32,
+    /// Unit-length embedding of the name (only when embeddings are enabled).
+    #[serde(skip)]
+    pub name_vec: Option<std::sync::Arc<[f32]>>,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
 }
@@ -230,6 +233,7 @@ impl Ctx<'_> {
             boilerplate,
             is_test,
             lines: (node.end_position().row - node.start_position().row + 1) as u32,
+            name_vec: None,
             name_parts,
         });
     }

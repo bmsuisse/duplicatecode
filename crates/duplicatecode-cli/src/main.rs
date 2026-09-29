@@ -1,4 +1,5 @@
 mod bench;
+mod review;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -6,6 +7,47 @@ use duplicatecode_engine::index::Weights;
 use duplicatecode_engine::{diff, find_matches, Corpus, load_units, load_units_with, units_from_file, MatchOptions};
 use std::io::Read;
 use std::path::PathBuf;
+
+/// Optional semantic name similarity (Azure AI Foundry / Azure OpenAI / OpenAI-compatible embeddings).
+/// Configure with AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
+/// AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT. Vectors are cached in a flat file.
+#[derive(clap::Args, Clone)]
+struct EmbedArgs {
+    /// Embed unit names and use the cosine as an extra name-similarity signal.
+    #[arg(long)]
+    embeddings: bool,
+    /// Vector size requested from the service (text-embedding-3 models accept shorter vectors).
+    #[arg(long, default_value_t = 256)]
+    embed_dims: u32,
+    /// Flat cache file (default ~/.cache/duplicatecode/embeddings.bin).
+    #[arg(long)]
+    embed_cache: Option<PathBuf>,
+    /// Cosine at/below which two names count as unrelated. Calibrate with `embed-test`.
+    #[arg(long, default_value_t = 0.5)]
+    embed_floor: f64,
+}
+
+impl EmbedArgs {
+    fn apply(&self, units: &mut [duplicatecode_engine::Unit]) -> Result<()> {
+        if !self.embeddings {
+            return Ok(());
+        }
+        let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
+            .context("--embeddings needs AZURE_AI_FOUNDRY_ENDPOINT (or AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT)")?;
+        let path = self.embed_cache.clone().unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
+        let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
+        let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache).map_err(anyhow::Error::msg)?;
+        eprintln!(
+            "embeddings: {} distinct names ({} cached, {} fetched) via {} [{}]",
+            st.distinct_names, st.from_cache, st.fetched, cfg.model_id(), path.display()
+        );
+        Ok(())
+    }
+
+    fn weights(&self, w: Weights) -> Weights {
+        Weights { name_floor: self.embed_floor, ..w }
+    }
+}
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Profile {
@@ -35,6 +77,8 @@ enum Cmd {
     Units { path: PathBuf },
     /// Check the added code in a unified diff against the existing code in a repo.
     Diff {
+        #[command(flatten)]
+        embed: EmbedArgs,
         /// Repository root (the corpus, and where the diff's paths resolve).
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -58,8 +102,45 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Duplicate candidates as compact markdown for an LLM (or human) to verify: ranked groups,
+    /// code preview, what differs, hints. The recommended entry point for AI agents.
+    Review {
+        #[command(flatten)]
+        embed: EmbedArgs,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Lower = more candidates (recall), higher = fewer (precision).
+        #[arg(long, default_value_t = 0.45)]
+        threshold: f64,
+        #[arg(long, default_value_t = 0.3)]
+        min_name: f64,
+        #[arg(long, default_value_t = 6)]
+        min_lines: u32,
+        #[arg(long)]
+        skip_tests: bool,
+        #[arg(long, default_value_t = 40)]
+        max_groups: usize,
+        #[arg(long, default_value_t = 8)]
+        preview_lines: usize,
+        #[arg(long, value_enum, default_value_t = Profile::Copies)]
+        profile: Profile,
+    },
+    /// Embed identifiers and print their cosine similarity (to check credentials and calibrate `--embed-floor`).
+    EmbedTest {
+        #[command(flatten)]
+        embed: EmbedArgs,
+        /// Two or more identifiers, e.g. `pickName pickLocalizedLabel getInitials`.
+        #[arg(required = true, num_args = 2..)]
+        names: Vec<String>,
+    },
+    /// Print source lines of a unit: `show path/to/file.py:10-40`.
+    Show { spec: String },
     /// Find similar unit pairs inside one repository (self-comparison).
     Scan {
+        #[command(flatten)]
+        embed: EmbedArgs,
         /// One or more folders (e.g. every package of a monorepo).
         #[arg(required = true)]
         paths: Vec<PathBuf>,
@@ -190,7 +271,7 @@ fn main() -> Result<()> {
                 println!("{}:{}-{} {} {} ({} tokens)", u.file, u.start_line, u.end_line, u.kind, u.name, u.token_count());
             }
         }
-        Cmd::Diff { repo, diff, threshold, min_tokens, min_name, profile, min_lines, json } => {
+        Cmd::Diff { embed, repo, diff, threshold, min_tokens, min_name, profile, min_lines, json } => {
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -205,8 +286,11 @@ fn main() -> Result<()> {
                     ranges.iter().any(|&(s, e)| s <= u.end_line && u.start_line <= e)
                 }));
             }
-            let corpus = Corpus::new(load_units(&repo));
-            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, weights: profile.weights(), ..Default::default() };
+            let mut corpus_units = load_units(&repo);
+            embed.apply(&mut corpus_units)?;
+            embed.apply(&mut queries)?;
+            let corpus = Corpus::new(corpus_units);
+            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, weights: embed.weights(profile.weights()), ..Default::default() };
             // when both sides are new code the pair shows up twice; report it once
             let mut seen = std::collections::HashSet::new();
             let matches: Vec<_> = find_matches(&queries, &corpus, opts)
@@ -232,7 +316,52 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Scan { paths, exclude, threshold, min_tokens, min_name, profile, min_lines, skip_tests, cross_file, pairs_out, fail_on_found, json } => {
+        Cmd::Review { embed, paths, exclude, threshold, min_name, min_lines, skip_tests, max_groups, preview_lines, profile } => {
+            let mut units = Vec::new();
+            let mut src = std::collections::HashMap::new();
+            for p in &paths {
+                for mut u in load_units_with(p, &exclude) {
+                    let real = p.join(&u.file);
+                    if paths.len() > 1 {
+                        u.file = format!("{}/{}", p.display(), u.file);
+                    }
+                    src.insert(u.file.clone(), real);
+                    units.push(u);
+                }
+            }
+            embed.apply(&mut units)?;
+            let o = review::ReviewOptions { threshold, min_name, min_lines, skip_tests, max_groups, preview_lines, weights: embed.weights(profile.weights()) };
+            print!("{}", review::run(units, &src, &o));
+        }
+        Cmd::EmbedTest { embed, names } => {
+            let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
+                .context("set AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)")?;
+            let path = embed.embed_cache.clone().unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
+            let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
+            let mut units: Vec<_> = names
+                .iter()
+                .filter_map(|n| duplicatecode_engine::extract_units("x.py", duplicatecode_engine::Lang::Python, &format!("def {n}():\n    return 1\n")).into_iter().next())
+                .collect();
+            let st = duplicatecode_engine::embed::embed_unit_names(&mut units, &cfg, &mut cache).map_err(anyhow::Error::msg)?;
+            println!("model {} ({} fetched, {} cached)", cfg.model_id(), st.fetched, st.from_cache);
+            for i in 0..units.len() {
+                for j in i + 1..units.len() {
+                    let (a, b) = (units[i].name_vec.as_ref().unwrap(), units[j].name_vec.as_ref().unwrap());
+                    let cos: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    println!("{:.3}  {}  ~  {}", cos, units[i].name, units[j].name);
+                }
+            }
+        }
+        Cmd::Show { spec } => {
+            let (file, range) = spec.rsplit_once(':').context("expected path:START-END")?;
+            let (a, b) = range.split_once('-').context("expected START-END")?;
+            let (a, b): (usize, usize) = (a.parse()?, b.parse()?);
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+            for (i, l) in text.lines().enumerate().skip(a.saturating_sub(1)).take(b + 1 - a) {
+                println!("{:>5}| {l}", i + 1);
+            }
+        }
+        Cmd::Scan { embed, paths, exclude, threshold, min_tokens, min_name, profile, min_lines, skip_tests, cross_file, pairs_out, fail_on_found, json } => {
             let mut units = Vec::new();
             for p in &paths {
                 for mut u in load_units_with(p, &exclude) {
@@ -242,8 +371,9 @@ fn main() -> Result<()> {
                     units.push(u);
                 }
             }
+            embed.apply(&mut units)?;
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, skip_tests, weights: profile.weights(), ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, skip_tests, weights: embed.weights(profile.weights()), ..Default::default() };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units

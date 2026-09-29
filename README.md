@@ -107,3 +107,23 @@ true duplicates (25/25 MDMApp, 13/15 OneSales) and 23 of the 25 that the LLM-onl
 What it still misses: a differently-written picker function (same purpose, different code) and a formatFileSize
 variant with different constants. Fixed after this test: tiny same-name exact copies (`min_tokens` 20 -> 8, near-exact
 same-name rule) and multi-line module-level values such as `export const queryClient = new QueryClient({...})`.
+
+### Cheap model + CLI + skill (Haiku) vs Sonnet (MDMApp, OneSales)
+
+Same task and judging as above (blind judges, pooled recall against all distinct confirmed true duplicates: 37 in MDMApp,
+18 in OneSales). `review` + `skills/duplicate-code-review/SKILL.md` were built from what the first runs missed.
+"cost index" = tokens x relative price (Haiku assumed 1/3 of Sonnet per token; estimate).
+
+| repo | approach | groups | precision true / incl. partial | recall | tokens | cost index |
+|---|---|---|---|---|---|---|
+| MDMApp | Sonnet, no CLI | 25 | 60% / 80% | 41% | 86k | 259 |
+| MDMApp | Sonnet + CLI | 29 | 79% / 93% | 54% | 59k | 177 |
+| MDMApp | **Haiku + CLI + skill** (r1 / r2) | 31 / 40 | 90% / 90%  ·  70% / 82% | 65% / **70%** | 86k / 86k | **86** |
+| OneSales | Sonnet, no CLI | 28 | 36% / 71% | 56% | 131k | 393 |
+| OneSales | Sonnet + CLI | 21 | 52% / 90% | 61% | 62k | 187 |
+| OneSales | **Haiku + CLI + skill** (r1 / r2) | 11 / 30 | 82% / 91%  ·  33% / 67% | 50% / 50% | 88k / 74k | **74–88** |
+
+r1 = first skill (top-60 groups only); r2 = skill with `--brief` paging. Read: on MDMApp Haiku + CLI beats Sonnet alone on
+recall (70% vs 41%) and precision at about a third of the cost; on OneSales it is at par with Sonnet alone on recall
+(50% vs 56%, one group) with better-or-equal precision at about a fifth of the cost, but below Sonnet + CLI. Broadening (r2)
+buys recall at the price of precision on OneSales. Small samples; judges and finders are the same model family.

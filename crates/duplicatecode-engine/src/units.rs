@@ -169,7 +169,8 @@ impl Ctx<'_> {
 
     fn emit(&mut self, kind: &str, name: String, node: Node) {
         let mut f = Features::default();
-        self.collect(node, &mut f);
+        self.collect_features(node, &mut f);
+        self.norm_tokens(node, &mut f.tokens, false);
         let Features { tokens, callees, literals, api, kinds } = f;
         let fingerprint = kgram_hashes(&tokens, KGRAM);
         let fingerprint2 = kgram_hashes(&tokens, 2);
@@ -208,16 +209,242 @@ impl Ctx<'_> {
         });
     }
 
+    // ---- normalization -------------------------------------------------------------------
+
+    /// Nodes that never take part in comparison: comments, type-level syntax, docstrings and
+    /// debug output (print/logging/console calls).
+    fn is_ignored(&self, node: Node) -> bool {
+        let kind = node.kind();
+        TYPE_KINDS.contains(&kind)
+            || (self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node))
+            || self.is_debug(node)
+    }
+
+    fn is_debug(&self, node: Node) -> bool {
+        match node.kind() {
+            "debugger_statement" => true,
+            "expression_statement" => {
+                let Some(e) = node.named_child(0) else { return false };
+                if !matches!(e.kind(), "call" | "call_expression") {
+                    return false;
+                }
+                let Some(f) = e.child_by_field_name("function") else { return false };
+                match f.kind() {
+                    "identifier" => matches!(self.text(f).as_str(), "print" | "pprint"),
+                    "attribute" | "member_expression" => {
+                        let Some(obj) = f.child_by_field_name("object") else { return false };
+                        let name = match obj.kind() {
+                            "identifier" => self.text(obj),
+                            "attribute" | "member_expression" => obj
+                                .child_by_field_name(if obj.kind() == "attribute" { "attribute" } else { "property" })
+                                .map(|x| self.text(x))
+                                .unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        matches!(
+                            name.to_lowercase().as_str(),
+                            "logging" | "logger" | "log" | "console" | "_logger" | "_log"
+                        )
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// `x = expr` immediately followed by `return x`  ==>  the value expression of `return expr`.
+    fn temp_return<'t>(&self, a: Node<'t>, b: Node<'t>) -> Option<Node<'t>> {
+        if b.kind() != "return_statement" || b.named_child_count() != 1 {
+            return None;
+        }
+        let (name, value) = if self.lang == Lang::Python {
+            if a.kind() != "expression_statement" {
+                return None;
+            }
+            let asg = a.named_child(0).filter(|x| x.kind() == "assignment")?;
+            (asg.child_by_field_name("left")?, asg.child_by_field_name("right")?)
+        } else {
+            if a.kind() != "lexical_declaration" || a.named_child_count() != 1 {
+                return None;
+            }
+            let d = a.named_child(0).filter(|x| x.kind() == "variable_declarator")?;
+            (d.child_by_field_name("name")?, d.child_by_field_name("value")?)
+        };
+        if matches!(value.kind(), "list_comprehension" | "set_comprehension" | "dictionary_comprehension") {
+            return None; // keep the loop-shaped form (see comprehension_tokens)
+        }
+        let ret = b.named_child(0)?;
+        (name.kind() == "identifier" && ret.kind() == "identifier" && self.text(name) == self.text(ret))
+            .then_some(value)
+    }
+
+    /// Normalized leaf tokens of `node`. Identifiers/literals are abstracted; comprehensions are
+    /// rendered as the equivalent loop; augmented assignment as plain assignment; a temp variable
+    /// returned right after its definition is inlined. With `skip_blocks`, nested blocks are left
+    /// out (statement headers).
+    fn norm_tokens(&self, node: Node, out: &mut Vec<String>, skip_blocks: bool) {
+        let kind = node.kind();
+        if self.is_ignored(node) || (skip_blocks && matches!(kind, "block" | "statement_block")) {
+            return;
+        }
+        match kind {
+            "string" | "template_string" | "string_literal" | "concatenated_string" => out.push("STR".into()),
+            "integer" | "float" | "number" => out.push("NUM".into()),
+            "identifier" | "property_identifier" | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern" | "type_identifier"
+            | "private_property_identifier" => out.push("ID".into()),
+            "list_comprehension" | "set_comprehension" | "dictionary_comprehension" | "generator_expression" => {
+                self.comprehension_tokens(node, out)
+            }
+            // `return [e for ...]` reads like `r = []; for ...: r.append(e); return r`
+            "return_statement"
+                if self.lang == Lang::Python
+                    && node.named_child(0).is_some_and(|e| {
+                        matches!(e.kind(), "list_comprehension" | "set_comprehension" | "dictionary_comprehension")
+                    }) =>
+            {
+                out.extend(["ID", "="].map(String::from));
+                if let Some(e) = node.named_child(0) {
+                    self.comprehension_tokens(e, out);
+                }
+                out.extend(["return", "ID"].map(String::from));
+            }
+            "augmented_assignment" | "augmented_assignment_expression" => {
+                match (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("operator"),
+                    node.child_by_field_name("right"),
+                ) {
+                    (Some(l), Some(op), Some(r)) => {
+                        self.norm_tokens(l, out, skip_blocks);
+                        out.push("=".into());
+                        self.norm_tokens(l, out, skip_blocks);
+                        out.push(norm_leaf(op.kind().trim_end_matches('=')).to_string());
+                        self.norm_tokens(r, out, skip_blocks);
+                    }
+                    _ => self.norm_children(node, out, skip_blocks),
+                }
+            }
+            "block" | "statement_block" | "module" | "program" => {
+                let n = node.child_count();
+                let mut i = 0;
+                while i < n {
+                    let Some(c) = node.child(i) else { break };
+                    if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
+                        out.push("return".into());
+                        self.norm_tokens(v, out, skip_blocks);
+                        if self.lang != Lang::Python {
+                            out.push(";".into());
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    self.norm_tokens(c, out, skip_blocks);
+                    i += 1;
+                }
+            }
+            _ if node.child_count() == 0 => out.push(norm_leaf(kind).to_string()),
+            _ => self.norm_children(node, out, skip_blocks),
+        }
+    }
+
+    fn norm_children(&self, node: Node, out: &mut Vec<String>, skip_blocks: bool) {
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                self.norm_tokens(c, out, skip_blocks);
+            }
+        }
+    }
+
+    /// `[e for x in xs if c]` is rendered like `r = []; for x in xs: if c: r.append(e)`.
+    fn comprehension_tokens(&self, node: Node, out: &mut Vec<String>) {
+        let open: &[&str] = match node.kind() {
+            "set_comprehension" => &["set", "(", ")"],
+            "dictionary_comprehension" => &["{", "}"],
+            _ => &["[", "]"],
+        };
+        out.extend(open.iter().map(|t| t.to_string()));
+        for i in 0..node.child_count() {
+            let Some(c) = node.child(i) else { continue };
+            match c.kind() {
+                "for_in_clause" => self.for_header(c, out),
+                "if_clause" => self.if_header(c, out),
+                _ => {}
+            }
+        }
+        if let Some(body) = node.child_by_field_name("body") {
+            self.append_stmt(node.kind(), body, out);
+        }
+    }
+
+    fn for_header(&self, clause: Node, out: &mut Vec<String>) {
+        out.push("for".into());
+        if let Some(l) = clause.child_by_field_name("left") {
+            self.norm_tokens(l, out, false);
+        }
+        out.push("in".into());
+        if let Some(r) = clause.child_by_field_name("right") {
+            self.norm_tokens(r, out, false);
+        }
+        out.push(":".into());
+    }
+
+    fn if_header(&self, clause: Node, out: &mut Vec<String>) {
+        out.push("if".into());
+        if let Some(c) = clause.named_child(0) {
+            self.norm_tokens(c, out, false);
+        }
+        out.push(":".into());
+    }
+
+    fn append_stmt(&self, comp_kind: &str, body: Node, out: &mut Vec<String>) {
+        if comp_kind == "dictionary_comprehension" {
+            out.extend(["ID", "["].map(String::from));
+            if let Some(k) = body.child_by_field_name("key") {
+                self.norm_tokens(k, out, false);
+            }
+            out.extend(["]", "="].map(String::from));
+            if let Some(v) = body.child_by_field_name("value") {
+                self.norm_tokens(v, out, false);
+            }
+        } else {
+            out.extend(["ID", ".", "ID", "("].map(String::from));
+            self.norm_tokens(body, out, false);
+            out.push(")".into());
+        }
+    }
+
+    // ---- statements ------------------------------------------------------------------------
+
     /// Statements of a unit in source order: every child of a block, at any depth. A statement
     /// holds the tokens of its own header (nested blocks are their own statements).
     fn statements(&self, node: Node, out: &mut Vec<Stmt>) {
-        let is_block = matches!(node.kind(), "block" | "statement_block" | "module" | "program");
-        for i in 0..node.child_count() {
-            let Some(c) = node.child(i) else { continue };
-            if is_block && c.is_named() && !matches!(c.kind(), "comment") {
-                if !(self.lang == Lang::Python && c.kind() == "expression_statement" && is_docstring(c)) {
+        let blockish = matches!(node.kind(), "block" | "statement_block" | "module" | "program");
+        let n = node.child_count();
+        let mut i = 0;
+        while i < n {
+            let Some(c) = node.child(i) else { break };
+            if self.is_ignored(c) {
+                i += 1;
+                continue;
+            }
+            if blockish && c.is_named() {
+                if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
+                    let mut tokens = vec!["return".to_string()];
+                    self.norm_tokens(v, &mut tokens, true);
+                    if self.lang != Lang::Python {
+                        tokens.push(";".into());
+                    }
+                    let mut shape = vec!["return_statement".to_string()];
+                    shape.extend(shape_of(v).into_iter().take(3));
+                    out.push(Stmt { tokens, shape });
+                    i += 2;
+                    continue;
+                }
+                if !self.comprehension_stmts(c, out) {
                     let mut tokens = Vec::new();
-                    self.header_tokens(c, &mut tokens);
+                    self.norm_tokens(c, &mut tokens, true);
                     out.push(Stmt { tokens, shape: shape_of(c) });
                 }
             } else if node.kind() == "arrow_function"
@@ -226,61 +453,87 @@ impl Ctx<'_> {
             {
                 // expression-bodied arrow function: the body expression acts as a statement
                 let mut tokens = Vec::new();
-                self.header_tokens(c, &mut tokens);
+                self.norm_tokens(c, &mut tokens, true);
                 out.push(Stmt { tokens, shape: vec!["return".into(), shape_of(c).join(">")] });
             }
             self.statements(c, out);
+            i += 1;
         }
     }
 
-    /// Normalized leaf tokens of a statement, skipping nested blocks and type-level syntax.
-    fn header_tokens(&self, node: Node, out: &mut Vec<String>) {
-        let kind = node.kind();
-        if matches!(
-            kind,
-            "comment" | "block" | "statement_block" | "type_annotation" | "type_parameters"
-                | "type_arguments" | "type_predicate_annotation" | "asserts_annotation" | "type"
-                | "type_parameter"
-        ) {
-            return;
+    /// Python `x = [e for ...]` / `return [e for ...]` as the statements of the equivalent loop.
+    fn comprehension_stmts(&self, c: Node, out: &mut Vec<Stmt>) -> bool {
+        if self.lang != Lang::Python {
+            return false;
         }
-        match kind {
-            "string" | "template_string" | "string_literal" | "concatenated_string" => {
-                out.push("STR".into());
+        let is_comp = |k: &str| {
+            matches!(k, "list_comprehension" | "set_comprehension" | "dictionary_comprehension")
+        };
+        let (target, comp, is_return) = match c.kind() {
+            "expression_statement" => {
+                let Some(a) = c.named_child(0).filter(|a| a.kind() == "assignment") else { return false };
+                let (Some(l), Some(r)) = (a.child_by_field_name("left"), a.child_by_field_name("right")) else {
+                    return false;
+                };
+                (Some(l), r, false)
             }
-            "integer" | "float" | "number" => out.push("NUM".into()),
-            "identifier" | "property_identifier" | "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern" | "type_identifier"
-            | "private_property_identifier" => out.push("ID".into()),
-            _ if node.child_count() == 0 => out.push(kind.to_string()),
-            _ => {
-                for i in 0..node.child_count() {
-                    if let Some(c) = node.child(i) {
-                        self.header_tokens(c, out);
-                    }
+            "return_statement" => {
+                let Some(e) = c.named_child(0) else { return false };
+                (None, e, true)
+            }
+            _ => return false,
+        };
+        if !is_comp(comp.kind()) {
+            return false;
+        }
+        let mut tokens = Vec::new();
+        match target {
+            Some(l) => self.norm_tokens(l, &mut tokens, true),
+            None => tokens.push("ID".into()),
+        }
+        tokens.extend(["=", "[", "]"].map(String::from));
+        out.push(Stmt {
+            tokens,
+            shape: ["expression_statement", "assignment", "list"].map(String::from).to_vec(),
+        });
+        for i in 0..comp.child_count() {
+            let Some(cl) = comp.child(i) else { continue };
+            let mut tokens = Vec::new();
+            let mut shape;
+            match cl.kind() {
+                "for_in_clause" => {
+                    self.for_header(cl, &mut tokens);
+                    shape = vec!["for_statement".to_string()];
+                    shape.extend(cl.child_by_field_name("right").map(shape_of).unwrap_or_default().into_iter().take(3));
                 }
+                "if_clause" => {
+                    self.if_header(cl, &mut tokens);
+                    shape = vec!["if_statement".to_string()];
+                    shape.extend(cl.named_child(0).map(shape_of).unwrap_or_default().into_iter().take(3));
+                }
+                _ => continue,
             }
+            out.push(Stmt { tokens, shape });
         }
+        if let Some(body) = comp.child_by_field_name("body") {
+            let mut tokens = Vec::new();
+            self.append_stmt(comp.kind(), body, &mut tokens);
+            out.push(Stmt {
+                tokens,
+                shape: ["expression_statement", "call", "attribute"].map(String::from).to_vec(),
+            });
+        }
+        if is_return {
+            out.push(Stmt { tokens: vec!["return".into(), "ID".into()], shape: vec!["return_statement".into()] });
+        }
+        true
     }
 
-    fn collect(&self, node: Node, f: &mut Features) {
+    // ---- features (API names, literals, node-kind histogram) ---------------------------------
+
+    fn collect_features(&self, node: Node, f: &mut Features) {
         let kind = node.kind();
-        if matches!(
-            kind,
-            "comment"
-                // TypeScript type-level syntax
-                | "type_annotation"
-                | "type_parameters"
-                | "type_arguments"
-                | "type_predicate_annotation"
-                | "asserts_annotation"
-                // Python annotations
-                | "type"
-                | "type_parameter"
-        ) {
-            return;
-        }
-        if self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node) {
+        if self.is_ignored(node) {
             return;
         }
         match kind {
@@ -299,11 +552,7 @@ impl Ctx<'_> {
                     f.api.insert(self.text(a).to_lowercase());
                 }
             }
-            _ => {}
-        }
-        match kind {
             "string" | "template_string" | "string_literal" | "concatenated_string" => {
-                f.tokens.push("STR".into());
                 let t = self.text(node);
                 let t = t.trim_matches(|c| c == '"' || c == '\'' || c == '`');
                 if !t.is_empty() && t.len() <= 24 && !t.contains('{') {
@@ -312,33 +561,58 @@ impl Ctx<'_> {
                 return;
             }
             "integer" | "float" | "number" => {
-                f.tokens.push("NUM".into());
                 let t = self.text(node);
                 if !matches!(t.as_str(), "0" | "1" | "2" | "-1") {
                     f.literals.insert(t);
                 }
                 return;
             }
-            "identifier" | "property_identifier" | "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern" | "type_identifier"
-            | "private_property_identifier" => {
-                f.tokens.push("ID".into());
-                return;
-            }
             _ => {}
         }
         if node.child_count() == 0 {
-            f.tokens.push(kind.to_string());
             return;
         }
-        if node.is_named() {
-            *f.kinds.entry(kind.to_string()).or_insert(0) += 1;
+        // comprehensions count as the loop/branch nodes of their expanded form
+        match kind {
+            "list_comprehension" | "set_comprehension" | "dictionary_comprehension" | "generator_expression" => {}
+            "for_in_clause" => *f.kinds.entry("for_statement".into()).or_insert(0) += 1,
+            "if_clause" => *f.kinds.entry("if_statement".into()).or_insert(0) += 1,
+            _ if node.is_named() => *f.kinds.entry(kind.to_string()).or_insert(0) += 1,
+            _ => {}
         }
         for i in 0..node.child_count() {
             if let Some(c) = node.child(i) {
-                self.collect(c, f);
+                self.collect_features(c, f);
             }
         }
+    }
+}
+
+const TYPE_KINDS: &[&str] = &[
+    "comment",
+    // TypeScript type-level syntax
+    "type_annotation",
+    "type_parameters",
+    "type_arguments",
+    "type_predicate_annotation",
+    "asserts_annotation",
+    // Python annotations
+    "type",
+    "type_parameter",
+];
+
+/// Operator/keyword spellings that mean the same across (and within) the supported languages.
+fn norm_leaf(kind: &str) -> &str {
+    match kind {
+        "===" => "==",
+        "!==" => "!=",
+        "is" => "==",
+        "and" => "&&",
+        "or" => "||",
+        "not" => "!",
+        "none" => "null",
+        "var" | "const" => "let",
+        other => other,
     }
 }
 
@@ -419,6 +693,50 @@ mod tests {
         let u = extract_units("x.ts", Lang::TypeScript, src);
         let names: Vec<_> = u.iter().map(|u| (u.kind.as_str(), u.name.as_str())).collect();
         assert_eq!(names, [("function", "f"), ("class", "K"), ("method", "m")]);
+    }
+
+    fn toks(src: &str) -> Vec<String> {
+        extract_units("x.py", Lang::Python, src).remove(0).tokens
+    }
+
+    #[test]
+    fn debug_statements_are_dropped() {
+        let plain = "def f(x):\n    y = g(x)\n    return y + 1\n";
+        let noisy = "def f(x):\n    print(x)\n    logger.info('a')\n    y = g(x)\n    self.log.debug(y)\n    return y + 1\n";
+        assert_eq!(toks(plain), toks(noisy));
+        let u = extract_units("x.py", Lang::Python, noisy).remove(0);
+        assert!(!u.callees.contains("print") && !u.callees.contains("info"));
+        assert_eq!(
+            extract_units("x.ts", Lang::TypeScript, "function f(x: number) { console.log(x); return g(x) + 1; }")[0].tokens,
+            extract_units("x.ts", Lang::TypeScript, "function f(x: number) { return g(x) + 1; }")[0].tokens
+        );
+    }
+
+    #[test]
+    fn comprehension_equals_loop() {
+        let loop_form = "def f(xs):\n    out = []\n    for x in xs:\n        if x > 0:\n            out.append(x * 2)\n    return out\n";
+        let comp = "def f(xs):\n    out = [x * 2 for x in xs if x > 0]\n    return out\n";
+        let comp_ret = "def f(xs):\n    return [x * 2 for x in xs if x > 0]\n";
+        assert_eq!(toks(loop_form), toks(comp));
+        assert_eq!(toks(loop_form), toks(comp_ret));
+        // statement-level view agrees too
+        let a = extract_units("a.py", Lang::Python, loop_form).remove(0);
+        let b = extract_units("b.py", Lang::Python, comp_ret).remove(0);
+        assert_eq!(a.stmts_exact, b.stmts_exact);
+        assert_eq!(a.shape_seq, b.shape_seq);
+    }
+
+    #[test]
+    fn augmented_assignment_and_temp_return() {
+        assert_eq!(toks("def f(x):\n    x += 1\n    y = g(x)\n    return y\n"), toks("def f(x):\n    x = x + 1\n    y = g(x)\n    return y\n"));
+        assert_eq!(
+            toks("def f(a, b):\n    r = a + b\n    return r\n"),
+            toks("def f(a, b):\n    return a + b\n")
+        );
+        let ts1 = extract_units("a.ts", Lang::TypeScript, "function f(a: number) { const r = a * 2; return r; }");
+        let ts2 = extract_units("b.ts", Lang::TypeScript, "function f(a: number) { return a * 2; }");
+        assert_eq!(ts1[0].tokens, ts2[0].tokens);
+        assert_eq!(ts1[0].shape_seq, ts2[0].shape_seq);
     }
 
     #[test]

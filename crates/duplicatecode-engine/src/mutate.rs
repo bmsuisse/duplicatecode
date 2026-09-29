@@ -18,17 +18,20 @@ pub enum Mutation {
     AddLogging,
     /// Insert an unused local variable.
     AddDeadCode,
+    /// Python: `x = []; for ..: [if ..:] x.append(e)` -> list comprehension.
+    LoopToComprehension,
     /// All of the above, applied in order.
     Combined,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 6] = [
+    pub const ALL: [Mutation; 7] = [
         Mutation::RenameAll,
         Mutation::SwapStatements,
         Mutation::TempVariable,
         Mutation::AddLogging,
         Mutation::AddDeadCode,
+        Mutation::LoopToComprehension,
         Mutation::Combined,
     ];
 
@@ -39,6 +42,7 @@ impl Mutation {
             Mutation::TempVariable => "temp-variable",
             Mutation::AddLogging => "add-logging",
             Mutation::AddDeadCode => "add-dead-code",
+            Mutation::LoopToComprehension => "loop-to-comprehension",
             Mutation::Combined => "combined",
         }
     }
@@ -57,9 +61,10 @@ pub fn apply(m: Mutation, lang: Lang, source: &str) -> String {
         Mutation::TempVariable => apply_one(temp_edits, lang, source),
         Mutation::AddLogging => apply_one(logging_edits, lang, source),
         Mutation::AddDeadCode => apply_one(dead_code_edits, lang, source),
+        Mutation::LoopToComprehension => apply_one(loop_to_comprehension_edits, lang, source),
         Mutation::Combined => {
             let mut s = source.to_string();
-            for step in [rename_edits, swap_edits, temp_edits, logging_edits, dead_code_edits] {
+            for step in [loop_to_comprehension_edits, rename_edits, swap_edits, temp_edits, logging_edits, dead_code_edits] {
                 s = apply_one(step, lang, &s);
             }
             s
@@ -354,6 +359,85 @@ fn temp_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
     edits
 }
 
+// ---- loop -> comprehension ------------------------------------------------------------------
+
+fn loop_to_comprehension_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    if lang != Lang::Python {
+        return edits;
+    }
+    walk(root, &mut |block| {
+        if block.kind() != "block" && block.kind() != "module" {
+            return;
+        }
+        let st = statements(block);
+        for w in st.windows(2) {
+            if let Some(e) = comprehension_edit(w[0], w[1], src) {
+                edits.push(e);
+            }
+        }
+    });
+    edits
+}
+
+/// `acc = []` + `for t in it: [if c:] acc.append(e)`  ->  `acc = [e for t in it if c]`.
+fn comprehension_edit(init: Node, lp: Node, src: &str) -> Option<Edit> {
+    let asg = init.named_child(0).filter(|a| init.kind() == "expression_statement" && a.kind() == "assignment")?;
+    let acc = asg.child_by_field_name("left").filter(|l| l.kind() == "identifier")?;
+    let right = asg.child_by_field_name("right")?;
+    if right.kind() != "list" || right.named_child_count() != 0 || lp.kind() != "for_statement" {
+        return None;
+    }
+    if lp.child_by_field_name("alternative").is_some() {
+        return None;
+    }
+    let target = lp.child_by_field_name("left")?;
+    let iter = lp.child_by_field_name("right")?;
+    let body = statements(lp.child_by_field_name("body")?);
+    if body.len() != 1 {
+        return None;
+    }
+    // optional single `if` (no elif/else) around the append
+    let (cond, append_stmt) = if body[0].kind() == "if_statement" {
+        let ifs = body[0];
+        if ifs.child_by_field_name("alternative").is_some() {
+            return None;
+        }
+        let inner = statements(ifs.child_by_field_name("consequence")?);
+        if inner.len() != 1 {
+            return None;
+        }
+        (Some(ifs.child_by_field_name("condition")?), inner[0])
+    } else {
+        (None, body[0])
+    };
+    let call = append_stmt.named_child(0).filter(|c| append_stmt.kind() == "expression_statement" && c.kind() == "call")?;
+    let f = call.child_by_field_name("function").filter(|f| f.kind() == "attribute")?;
+    let obj = f.child_by_field_name("object")?;
+    let attr = f.child_by_field_name("attribute")?;
+    if text(obj, src) != text(acc, src) || text(attr, src) != "append" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    if args.named_child_count() != 1 {
+        return None;
+    }
+    let elt = args.named_child(0)?;
+    let cond_txt = cond.map(|c| format!(" if {}", text(c, src))).unwrap_or_default();
+    Some(Edit {
+        start: init.start_byte(),
+        end: lp.end_byte(),
+        text: format!(
+            "{} = [{} for {} in {}{}]",
+            text(acc, src),
+            text(elt, src),
+            text(target, src),
+            text(iter, src),
+            cond_txt
+        ),
+    })
+}
+
 // ---- noise ----------------------------------------------------------------------------------
 
 fn insert_before(lang: Lang, n: Node, src: &str, stmt: &str) -> Option<Edit> {
@@ -425,6 +509,17 @@ mod tests {
         assert!(out.contains("result_value = acc + count\n    return result_value"));
         let out = apply(Mutation::SwapStatements, Lang::Python, PY);
         assert!(out.contains("count = 1\n    acc = 0"));
+    }
+
+    #[test]
+    fn loop_becomes_comprehension_and_normalizes_back() {
+        let src = "def f(xs):\n    out = []\n    for x in xs:\n        if x > 0:\n            out.append(x * 2)\n    return out\n";
+        let out = apply(Mutation::LoopToComprehension, Lang::Python, src);
+        assert!(out.contains("out = [x * 2 for x in xs if x > 0]"), "{out}");
+        let a = crate::extract_units("a.py", Lang::Python, src);
+        let b = crate::extract_units("b.py", Lang::Python, &out);
+        assert_eq!(a[0].tokens, b[0].tokens);
+        assert_eq!(a[0].shape_seq, b[0].shape_seq);
     }
 
     #[test]

@@ -157,7 +157,7 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_lev
 fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &Path, min_tokens: usize) {
     use rayon::prelude::*;
     let corpus = Corpus::new(load_units(neg));
-    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, min_lines: 0, min_name: 0.0, skip_boilerplate: true };
+    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_boilerplate: true };
     println!("\n== threshold sweep vs. negatives corpus {} ({} units) ==", neg.display(), corpus.units().len());
 
     // best combined score per dataset unit against the negatives (+ which corpus unit)

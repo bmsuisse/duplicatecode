@@ -2,9 +2,25 @@ mod bench;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use duplicatecode_engine::index::Weights;
 use duplicatecode_engine::{diff, find_matches, Corpus, load_units, units_from_file, MatchOptions};
 use std::io::Read;
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Profile {
+    Copies,
+    Reimpl,
+}
+
+impl Profile {
+    fn weights(self) -> Weights {
+        match self {
+            Profile::Copies => Weights::copies(),
+            Profile::Reimpl => Weights::default(),
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(version, about = "Detect duplicate/similar code in Python and TypeScript")]
@@ -25,13 +41,17 @@ enum Cmd {
         /// Diff file, or `-` for stdin.
         #[arg(long, default_value = "-")]
         diff: String,
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = 0.6)]
         threshold: f64,
         #[arg(long, default_value_t = 20)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
         #[arg(long, default_value_t = 0.3)]
         min_name: f64,
+        /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
+        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        #[arg(long, value_enum, default_value_t = Profile::Copies)]
+        profile: Profile,
         /// Ignore units shorter than this many lines.
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
@@ -48,6 +68,10 @@ enum Cmd {
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
         #[arg(long, default_value_t = 0.3)]
         min_name: f64,
+        /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
+        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        #[arg(long, value_enum, default_value_t = Profile::Copies)]
+        profile: Profile,
         /// Ignore units shorter than this many lines.
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
@@ -85,7 +109,7 @@ fn main() -> Result<()> {
                 println!("{}:{}-{} {} {} ({} tokens)", u.file, u.start_line, u.end_line, u.kind, u.name, u.token_count());
             }
         }
-        Cmd::Diff { repo, diff, threshold, min_tokens, min_name, min_lines, json } => {
+        Cmd::Diff { repo, diff, threshold, min_tokens, min_name, profile, min_lines, json } => {
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -101,8 +125,17 @@ fn main() -> Result<()> {
                 }));
             }
             let corpus = Corpus::new(load_units(&repo));
-            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, ..Default::default() };
-            let matches = find_matches(&queries, &corpus, opts);
+            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, weights: profile.weights(), ..Default::default() };
+            // when both sides are new code the pair shows up twice; report it once
+            let mut seen = std::collections::HashSet::new();
+            let matches: Vec<_> = find_matches(&queries, &corpus, opts)
+                .into_iter()
+                .filter(|m| {
+                    let a = format!("{}:{}", m.query.file, m.query.start_line);
+                    let b = format!("{}:{}", m.candidate.file, m.candidate.start_line);
+                    seen.insert(if a < b { (a, b) } else { (b, a) })
+                })
+                .collect();
             if json {
                 println!("{}", serde_json::to_string_pretty(&matches)?);
             } else if matches.is_empty() {
@@ -118,10 +151,10 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Scan { path, threshold, min_tokens, min_name, min_lines, cross_file, json } => {
+        Cmd::Scan { path, threshold, min_tokens, min_name, profile, min_lines, cross_file, json } => {
             let units = load_units(&path);
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 1, min_name, min_lines, ..Default::default() };
+            let opts = MatchOptions { threshold, min_tokens, top_n: 1, min_name, min_lines, weights: profile.weights(), ..Default::default() };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units

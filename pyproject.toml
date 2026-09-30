@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "duplicatecode"
+dynamic = ["version"]
+description = "Static (LLM-free) detection of duplicate/similar code in Python and TypeScript"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Environment :: Console",
+]
+
+# Ships the Rust CLI as a binary in a py3-none-<platform> wheel, so
+# `uv tool install duplicatecode` needs neither Rust nor a specific Python.
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/duplicatecode-cli/Cargo.toml"

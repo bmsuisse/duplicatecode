@@ -8,6 +8,18 @@ checked against existing source.
 - `crates/duplicatecode-cli` – `duplicatecode` CLI
 - `dataset/` – benchmark: coding tasks + diverging implementations (see `dataset/README.md`)
 
+## Install
+
+```sh
+uv tool install duplicatecode            # from PyPI (prebuilt binary, no Rust needed)
+uvx duplicatecode scan .                 # or run without installing
+curl -fsSL https://raw.githubusercontent.com/bmsuisse/duplicatecode/main/install.sh | sh   # standalone binary
+```
+
+Binaries for Linux/macOS/Windows (x86_64, plus aarch64 on Linux/macOS) are also attached to each
+[GitHub Release](https://github.com/bmsuisse/duplicatecode/releases). Releases are automatic: bump
+`version` in `[workspace.package]` in `Cargo.toml`, merge to `main`, and CI tags and publishes it.
+
 ## Usage
 
 ```sh

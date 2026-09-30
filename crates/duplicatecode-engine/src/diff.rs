@@ -11,11 +11,12 @@ pub fn added_ranges(diff: &str) -> AddedRanges {
     let mut new_line = 0u32;
     let mut run_start: Option<u32> = None;
 
-    let close = |out: &mut AddedRanges, file: &Option<String>, start: &mut Option<u32>, end: u32| {
-        if let (Some(f), Some(s)) = (file, start.take()) {
-            out.entry(f.clone()).or_default().push((s, end));
-        }
-    };
+    let close =
+        |out: &mut AddedRanges, file: &Option<String>, start: &mut Option<u32>, end: u32| {
+            if let (Some(f), Some(s)) = (file, start.take()) {
+                out.entry(f.clone()).or_default().push((s, end));
+            }
+        };
 
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("+++ ") {
@@ -28,7 +29,10 @@ pub fn added_ranges(diff: &str) -> AddedRanges {
         } else if let Some(rest) = line.strip_prefix("@@ ") {
             close(&mut out, &file, &mut run_start, new_line.saturating_sub(1));
             // @@ -a,b +c,d @@
-            let plus = rest.split_whitespace().find(|t| t.starts_with('+')).unwrap_or("+1");
+            let plus = rest
+                .split_whitespace()
+                .find(|t| t.starts_with('+'))
+                .unwrap_or("+1");
             let start = plus[1..].split(',').next().unwrap_or("1");
             new_line = start.parse().unwrap_or(1);
         } else if file.is_some() {

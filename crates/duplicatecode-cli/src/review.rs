@@ -66,10 +66,15 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         weights: o.weights,
         ..Default::default()
     };
-    let idx: HashMap<(&str, u32), usize> =
-        units.iter().enumerate().map(|(i, u)| ((u.file.as_str(), u.start_line), i)).collect();
-    let matches: Vec<Match> =
-        units.par_iter().flat_map_iter(|u| find_matches(std::slice::from_ref(u), &corpus, opts)).collect();
+    let idx: HashMap<(&str, u32), usize> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| ((u.file.as_str(), u.start_line), i))
+        .collect();
+    let matches: Vec<Match> = units
+        .par_iter()
+        .flat_map_iter(|u| find_matches(std::slice::from_ref(u), &corpus, opts))
+        .collect();
 
     // pairs -> unique edges -> connected components
     let mut seen = HashSet::new();
@@ -93,7 +98,10 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
     let mut groups: HashMap<usize, G> = HashMap::new();
     for (a, b, s) in edges {
         let r = find(&mut parent, a);
-        let g = groups.entry(r).or_insert_with(|| G { members: vec![], edges: vec![] });
+        let g = groups.entry(r).or_insert_with(|| G {
+            members: vec![],
+            edges: vec![],
+        });
         for x in [a, b] {
             if !g.members.contains(&x) {
                 g.members.push(x);
@@ -105,10 +113,18 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
     let mut ranked: Vec<(Tier, f64, G)> = groups
         .into_values()
         .map(|mut g| {
-            g.members.sort_by(|a, b| (&units[*a].file, units[*a].start_line).cmp(&(&units[*b].file, units[*b].start_line)));
-            g.edges.sort_by(|x, y| y.2.combined.total_cmp(&x.2.combined));
+            g.members.sort_by(|a, b| {
+                (&units[*a].file, units[*a].start_line)
+                    .cmp(&(&units[*b].file, units[*b].start_line))
+            });
+            g.edges
+                .sort_by(|x, y| y.2.combined.total_cmp(&x.2.combined));
             let best = g.edges[0].2;
-            let tier = if g.edges.iter().all(|e| e.2.structural >= 0.99 && e.2.stmt_exact >= 0.99) {
+            let tier = if g
+                .edges
+                .iter()
+                .all(|e| e.2.structural >= 0.99 && e.2.stmt_exact >= 0.99)
+            {
                 Tier::Identical
             } else if best.combined >= 0.6 {
                 Tier::NearCopy
@@ -122,7 +138,11 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
             (tier, best.combined - if noisy { 10.0 } else { 0.0 }, g)
         })
         .collect();
-    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(b.2.members.len().cmp(&a.2.members.len())));
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.total_cmp(&a.1))
+            .then(b.2.members.len().cmp(&a.2.members.len()))
+    });
 
     if let Some(t) = &o.tier {
         let want = match t.as_str() {
@@ -152,7 +172,11 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         counts(Tier::Similar)
     ));
     for (i, (tier, raw_score, g)) in ranked.iter().enumerate().skip(o.offset).take(o.max_groups) {
-        let score = &(if *raw_score < -5.0 { raw_score + 10.0 } else { *raw_score });
+        let score = &(if *raw_score < -5.0 {
+            raw_score + 10.0
+        } else {
+            *raw_score
+        });
         let us: Vec<&Unit> = g.members.iter().map(|&m| &units[m]).collect();
         let same_name = us.iter().all(|u| u.name == us[0].name);
         let mut hints: Vec<&str> = Vec::new();
@@ -190,10 +214,22 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
                 tier.label(),
                 score,
                 us.len(),
-                if same_name { format!("`{}` ", us[0].name) } else { format!("`{}`~`{}` ", us[0].name, us[1].name) },
-                if hints.is_empty() { String::new() } else { format!("[{}]", hints.join(",")) },
+                if same_name {
+                    format!("`{}` ", us[0].name)
+                } else {
+                    format!("`{}`~`{}` ", us[0].name, us[1].name)
+                },
+                if hints.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}]", hints.join(","))
+                },
                 mem.join(" | "),
-                if us.len() > 3 { format!(" | +{}", us.len() - 3) } else { String::new() }
+                if us.len() > 3 {
+                    format!(" | +{}", us.len() - 3)
+                } else {
+                    String::new()
+                }
             ));
             continue;
         }
@@ -203,10 +239,17 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
             tier.label(),
             score,
             us.len(),
-            if hints.is_empty() { String::new() } else { format!(" · {}", hints.join(", ")) }
+            if hints.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", hints.join(", "))
+            }
         ));
         for u in us.iter().take(8) {
-            out.push_str(&format!("- {}:{}-{} {} {}\n", u.file, u.start_line, u.end_line, u.kind, u.name));
+            out.push_str(&format!(
+                "- {}:{}-{} {} {}\n",
+                u.file, u.start_line, u.end_line, u.kind, u.name
+            ));
         }
         if us.len() > 8 {
             out.push_str(&format!("- … and {} more\n", us.len() - 8));
@@ -241,7 +284,11 @@ fn noise_reason(us: &[&Unit], best: &duplicatecode_engine::index::Scores) -> Opt
     if names_differ && best.structural >= 0.95 && best.api >= 0.99 && all_le(15) {
         return Some("parametrized twin: same shape and calls, differs only in names/literals (likely per-entity wrapper)");
     }
-    if names_differ && us.iter().all(|u| u.shape_seq.len() <= 3 && u.callees.len() <= 2) {
+    if names_differ
+        && us
+            .iter()
+            .all(|u| u.shape_seq.len() <= 3 && u.callees.len() <= 2)
+    {
         return Some("thin delegator: few statements, one or two calls");
     }
     None
@@ -257,23 +304,36 @@ fn trunc(s: &str) -> String {
 
 fn list(set: BTreeSet<&String>, n: usize) -> String {
     let v: Vec<String> = set.iter().take(n).map(|s| trunc(s)).collect();
-    format!("[{}{}]", v.join(", "), if set.len() > n { ", …" } else { "" })
+    format!(
+        "[{}{}]",
+        v.join(", "),
+        if set.len() > n { ", …" } else { "" }
+    )
 }
 
 /// What distinguishes the two closest members, from cheap token-set differences.
 fn differences(a: &Unit, b: &Unit) -> String {
     let mut parts = Vec::new();
-    let (la, lb): (BTreeSet<_>, BTreeSet<_>) = (a.literals.iter().collect(), b.literals.iter().collect());
+    let (la, lb): (BTreeSet<_>, BTreeSet<_>) =
+        (a.literals.iter().collect(), b.literals.iter().collect());
     let (aa, ab): (BTreeSet<_>, BTreeSet<_>) = (a.api.iter().collect(), b.api.iter().collect());
     let lit_a: BTreeSet<_> = la.difference(&lb).copied().collect();
     let lit_b: BTreeSet<_> = lb.difference(&la).copied().collect();
     let api_a: BTreeSet<_> = aa.difference(&ab).copied().collect();
     let api_b: BTreeSet<_> = ab.difference(&aa).copied().collect();
     if !lit_a.is_empty() || !lit_b.is_empty() {
-        parts.push(format!("literals only in first {} / only in second {}", list(lit_a, 4), list(lit_b, 4)));
+        parts.push(format!(
+            "literals only in first {} / only in second {}",
+            list(lit_a, 4),
+            list(lit_b, 4)
+        ));
     }
     if !api_a.is_empty() || !api_b.is_empty() {
-        parts.push(format!("calls/attributes only in first {} / only in second {}", list(api_a, 5), list(api_b, 5)));
+        parts.push(format!(
+            "calls/attributes only in first {} / only in second {}",
+            list(api_a, 5),
+            list(api_b, 5)
+        ));
     }
     if a.lines != b.lines {
         parts.push(format!("length {} vs {} lines", a.lines, b.lines));
@@ -291,16 +351,31 @@ fn diff_view(a: &Unit, b: &Unit, src: &HashMap<String, PathBuf>) -> String {
     let text = |u: &Unit| -> Option<String> {
         let t = std::fs::read_to_string(src.get(&u.file)?).ok()?;
         let lines: Vec<&str> = t.lines().collect();
-        let (s, e) = ((u.start_line as usize).saturating_sub(1), (u.end_line as usize).min(lines.len()));
-        Some(lines[s.min(e)..e].iter().map(|l| l.trim_end().to_string() + "\n").collect())
+        let (s, e) = (
+            (u.start_line as usize).saturating_sub(1),
+            (u.end_line as usize).min(lines.len()),
+        );
+        Some(
+            lines[s.min(e)..e]
+                .iter()
+                .map(|l| l.trim_end().to_string() + "\n")
+                .collect(),
+        )
     };
-    let (Some(ta), Some(tb)) = (text(a), text(b)) else { return String::new() };
-    let d = similar::TextDiff::configure().algorithm(similar::Algorithm::Myers).diff_lines(&ta, &tb);
+    let (Some(ta), Some(tb)) = (text(a), text(b)) else {
+        return String::new();
+    };
+    let d = similar::TextDiff::configure()
+        .algorithm(similar::Algorithm::Myers)
+        .diff_lines(&ta, &tb);
     let ratio = d.ratio();
     if ratio >= 0.9999 {
         return "diff (first vs second): textually identical\n".to_string();
     }
-    let mut out = format!("diff (first vs second, {:.0}% of lines equal):\n```diff\n", ratio * 100.0);
+    let mut out = format!(
+        "diff (first vs second, {:.0}% of lines equal):\n```diff\n",
+        ratio * 100.0
+    );
     let mut shown = 0;
     'outer: for group in d.grouped_ops(1) {
         for op in group {
@@ -326,8 +401,12 @@ fn diff_view(a: &Unit, b: &Unit, src: &HashMap<String, PathBuf>) -> String {
 }
 
 fn preview(u: &Unit, src: &HashMap<String, PathBuf>, n: usize) -> String {
-    let Some(path) = src.get(&u.file) else { return String::new() };
-    let Ok(text) = std::fs::read_to_string(path) else { return String::new() };
+    let Some(path) = src.get(&u.file) else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
     let lines: Vec<&str> = text.lines().collect();
     let start = (u.start_line as usize).saturating_sub(1);
     let end = (u.end_line as usize).min(lines.len());

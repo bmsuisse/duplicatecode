@@ -4,7 +4,9 @@ mod review;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use duplicatecode_engine::index::Weights;
-use duplicatecode_engine::{diff, find_matches, Corpus, load_units, load_units_with, units_from_file, MatchOptions};
+use duplicatecode_engine::{
+    diff, find_matches, load_units, load_units_with, units_from_file, Corpus, MatchOptions,
+};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -34,18 +36,29 @@ impl EmbedArgs {
         }
         let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
             .context("--embeddings needs AZURE_AI_FOUNDRY_ENDPOINT (or AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT)")?;
-        let path = self.embed_cache.clone().unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
+        let path = self
+            .embed_cache
+            .clone()
+            .unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
         let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
-        let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache).map_err(anyhow::Error::msg)?;
+        let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache)
+            .map_err(anyhow::Error::msg)?;
         eprintln!(
             "embeddings: {} distinct names ({} cached, {} fetched) via {} [{}]",
-            st.distinct_names, st.from_cache, st.fetched, cfg.model_id(), path.display()
+            st.distinct_names,
+            st.from_cache,
+            st.fetched,
+            cfg.model_id(),
+            path.display()
         );
         Ok(())
     }
 
     fn weights(&self, w: Weights) -> Weights {
-        Weights { name_floor: self.embed_floor, ..w }
+        Weights {
+            name_floor: self.embed_floor,
+            ..w
+        }
     }
 }
 
@@ -65,7 +78,10 @@ impl Profile {
 }
 
 #[derive(Parser)]
-#[command(version, about = "Detect duplicate/similar code in Python and TypeScript")]
+#[command(
+    version,
+    about = "Detect duplicate/similar code in Python and TypeScript"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -228,13 +244,15 @@ fn group_pairs(pairs: &[duplicatecode_engine::Match]) -> Vec<Group> {
     let mut idx: HashMap<String, usize> = HashMap::new();
     let mut refs: Vec<duplicatecode_engine::index::UnitRef> = Vec::new();
     let mut parent: Vec<usize> = Vec::new();
-    let mut id = |u: &duplicatecode_engine::index::UnitRef, refs: &mut Vec<_>, parent: &mut Vec<usize>| {
-        *idx.entry(format!("{}:{}", u.file, u.start_line)).or_insert_with(|| {
-            refs.push(u.clone());
-            parent.push(parent.len());
-            parent.len() - 1
-        })
-    };
+    let mut id =
+        |u: &duplicatecode_engine::index::UnitRef, refs: &mut Vec<_>, parent: &mut Vec<usize>| {
+            *idx.entry(format!("{}:{}", u.file, u.start_line))
+                .or_insert_with(|| {
+                    refs.push(u.clone());
+                    parent.push(parent.len());
+                    parent.len() - 1
+                })
+        };
     fn find(p: &mut Vec<usize>, x: usize) -> usize {
         if p[x] != x {
             let r = find(p, p[x]);
@@ -266,7 +284,10 @@ fn group_pairs(pairs: &[duplicatecode_engine::Match]) -> Vec<Group> {
         .map(|(r, ms)| {
             let mut units: Vec<_> = ms.into_iter().map(|i| refs[i].clone()).collect();
             units.sort_by(|a, b| (&a.file, a.start_line).cmp(&(&b.file, b.start_line)));
-            Group { score: best[&r], units }
+            Group {
+                score: best[&r],
+                units,
+            }
         })
         .collect();
     groups.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -277,10 +298,28 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Units { path } => {
             for u in load_units(&path) {
-                println!("{}:{}-{} {} {} ({} tokens)", u.file, u.start_line, u.end_line, u.kind, u.name, u.token_count());
+                println!(
+                    "{}:{}-{} {} {} ({} tokens)",
+                    u.file,
+                    u.start_line,
+                    u.end_line,
+                    u.kind,
+                    u.name,
+                    u.token_count()
+                );
             }
         }
-        Cmd::Diff { embed, repo, diff, threshold, min_tokens, min_name, profile, min_lines, json } => {
+        Cmd::Diff {
+            embed,
+            repo,
+            diff,
+            threshold,
+            min_tokens,
+            min_name,
+            profile,
+            min_lines,
+            json,
+        } => {
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -292,14 +331,23 @@ fn main() -> Result<()> {
             for (file, ranges) in diff::added_ranges(&text) {
                 let units = units_from_file(&repo, &repo.join(&file));
                 queries.extend(units.into_iter().filter(|u| {
-                    ranges.iter().any(|&(s, e)| s <= u.end_line && u.start_line <= e)
+                    ranges
+                        .iter()
+                        .any(|&(s, e)| s <= u.end_line && u.start_line <= e)
                 }));
             }
             let mut corpus_units = load_units(&repo);
             embed.apply(&mut corpus_units)?;
             embed.apply(&mut queries)?;
             let corpus = Corpus::new(corpus_units);
-            let opts = MatchOptions { threshold, min_tokens, min_name, min_lines, weights: embed.weights(profile.weights()), ..Default::default() };
+            let opts = MatchOptions {
+                threshold,
+                min_tokens,
+                min_name,
+                min_lines,
+                weights: embed.weights(profile.weights()),
+                ..Default::default()
+            };
             // when both sides are new code the pair shows up twice; report it once
             let mut seen = std::collections::HashSet::new();
             let matches: Vec<_> = find_matches(&queries, &corpus, opts)
@@ -313,7 +361,10 @@ fn main() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&matches)?);
             } else if matches.is_empty() {
-                println!("no similar code found ({} new/changed units checked)", queries.len());
+                println!(
+                    "no similar code found ({} new/changed units checked)",
+                    queries.len()
+                );
             } else {
                 for m in &matches {
                     println!(
@@ -325,7 +376,21 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Review { embed, paths, exclude, threshold, min_name, min_lines, skip_tests, max_groups, offset, brief, tier, preview_lines, profile } => {
+        Cmd::Review {
+            embed,
+            paths,
+            exclude,
+            threshold,
+            min_name,
+            min_lines,
+            skip_tests,
+            max_groups,
+            offset,
+            brief,
+            tier,
+            preview_lines,
+            profile,
+        } => {
             let mut units = Vec::new();
             let mut src = std::collections::HashMap::new();
             for p in &paths {
@@ -339,23 +404,56 @@ fn main() -> Result<()> {
                 }
             }
             embed.apply(&mut units)?;
-            let o = review::ReviewOptions { threshold, min_name, min_lines, skip_tests, max_groups, offset, brief, tier, preview_lines, weights: embed.weights(profile.weights()) };
+            let o = review::ReviewOptions {
+                threshold,
+                min_name,
+                min_lines,
+                skip_tests,
+                max_groups,
+                offset,
+                brief,
+                tier,
+                preview_lines,
+                weights: embed.weights(profile.weights()),
+            };
             print!("{}", review::run(units, &src, &o));
         }
         Cmd::EmbedTest { embed, names } => {
             let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
-                .context("set AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)")?;
-            let path = embed.embed_cache.clone().unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
+                .context(
+                    "set AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)",
+                )?;
+            let path = embed
+                .embed_cache
+                .clone()
+                .unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
             let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
             let mut units: Vec<_> = names
                 .iter()
-                .filter_map(|n| duplicatecode_engine::extract_units("x.py", duplicatecode_engine::Lang::Python, &format!("def {n}():\n    return 1\n")).into_iter().next())
+                .filter_map(|n| {
+                    duplicatecode_engine::extract_units(
+                        "x.py",
+                        duplicatecode_engine::Lang::Python,
+                        &format!("def {n}():\n    return 1\n"),
+                    )
+                    .into_iter()
+                    .next()
+                })
                 .collect();
-            let st = duplicatecode_engine::embed::embed_unit_names(&mut units, &cfg, &mut cache).map_err(anyhow::Error::msg)?;
-            println!("model {} ({} fetched, {} cached)", cfg.model_id(), st.fetched, st.from_cache);
+            let st = duplicatecode_engine::embed::embed_unit_names(&mut units, &cfg, &mut cache)
+                .map_err(anyhow::Error::msg)?;
+            println!(
+                "model {} ({} fetched, {} cached)",
+                cfg.model_id(),
+                st.fetched,
+                st.from_cache
+            );
             for i in 0..units.len() {
                 for j in i + 1..units.len() {
-                    let (a, b) = (units[i].name_vec.as_ref().unwrap(), units[j].name_vec.as_ref().unwrap());
+                    let (a, b) = (
+                        units[i].name_vec.as_ref().unwrap(),
+                        units[j].name_vec.as_ref().unwrap(),
+                    );
                     let cos: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                     println!("{:.3}  {}  ~  {}", cos, units[i].name, units[j].name);
                 }
@@ -366,11 +464,30 @@ fn main() -> Result<()> {
             let (a, b) = range.split_once('-').context("expected START-END")?;
             let (a, b): (usize, usize) = (a.parse()?, b.parse()?);
             let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
-            for (i, l) in text.lines().enumerate().skip(a.saturating_sub(1)).take(b + 1 - a) {
+            for (i, l) in text
+                .lines()
+                .enumerate()
+                .skip(a.saturating_sub(1))
+                .take(b + 1 - a)
+            {
                 println!("{:>5}| {l}", i + 1);
             }
         }
-        Cmd::Scan { embed, paths, exclude, threshold, min_tokens, min_name, profile, min_lines, skip_tests, cross_file, pairs_out, fail_on_found, json } => {
+        Cmd::Scan {
+            embed,
+            paths,
+            exclude,
+            threshold,
+            min_tokens,
+            min_name,
+            profile,
+            min_lines,
+            skip_tests,
+            cross_file,
+            pairs_out,
+            fail_on_found,
+            json,
+        } => {
             let mut units = Vec::new();
             for p in &paths {
                 for mut u in load_units_with(p, &exclude) {
@@ -382,7 +499,16 @@ fn main() -> Result<()> {
             }
             embed.apply(&mut units)?;
             let corpus = Corpus::new(units.clone());
-            let opts = MatchOptions { threshold, min_tokens, top_n: 3, min_name, min_lines, skip_tests, weights: embed.weights(profile.weights()), ..Default::default() };
+            let opts = MatchOptions {
+                threshold,
+                min_tokens,
+                top_n: 3,
+                min_name,
+                min_lines,
+                skip_tests,
+                weights: embed.weights(profile.weights()),
+                ..Default::default()
+            };
             let mut seen = std::collections::HashSet::new();
             use rayon::prelude::*;
             let mut pairs: Vec<_> = units
@@ -403,23 +529,47 @@ fn main() -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&pairs)?);
                 } else {
-                    println!("{} units scanned, {} similar pairs (>= {threshold})", units.len(), pairs.len());
+                    println!(
+                        "{} units scanned, {} similar pairs (>= {threshold})",
+                        units.len(),
+                        pairs.len()
+                    );
                     for m in &pairs {
                         println!(
                             "{:.2}  {}:{}-{} {}  ~  {}:{}-{} {}",
-                            m.scores.combined, m.query.file, m.query.start_line, m.query.end_line, m.query.name,
-                            m.candidate.file, m.candidate.start_line, m.candidate.end_line, m.candidate.name
+                            m.scores.combined,
+                            m.query.file,
+                            m.query.start_line,
+                            m.query.end_line,
+                            m.query.name,
+                            m.candidate.file,
+                            m.candidate.start_line,
+                            m.candidate.end_line,
+                            m.candidate.name
                         );
                     }
                 }
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&groups)?);
             } else {
-                println!("{} units scanned, {} duplicate groups ({} pairs, score >= {threshold})", units.len(), groups.len(), pairs.len());
+                println!(
+                    "{} units scanned, {} duplicate groups ({} pairs, score >= {threshold})",
+                    units.len(),
+                    groups.len(),
+                    pairs.len()
+                );
                 for (i, g) in groups.iter().enumerate() {
-                    println!("\ngroup {} — {} units, best score {:.2}", i + 1, g.units.len(), g.score);
+                    println!(
+                        "\ngroup {} — {} units, best score {:.2}",
+                        i + 1,
+                        g.units.len(),
+                        g.score
+                    );
                     for u in &g.units {
-                        println!("  {}:{}-{}  {} {}", u.file, u.start_line, u.end_line, u.kind, u.name);
+                        println!(
+                            "  {}:{}-{}  {} {}",
+                            u.file, u.start_line, u.end_line, u.kind, u.name
+                        );
                     }
                 }
             }
@@ -428,9 +578,21 @@ fn main() -> Result<()> {
             }
         }
         Cmd::ReimplEval { cases, impls } => bench::reimpl_eval(&cases, &impls)?,
-        Cmd::Bench { dataset, min_tokens, negatives, file_level, keep_boilerplate, mutations } => {
-            bench::run(&dataset, min_tokens, negatives.as_deref(), file_level, keep_boilerplate, mutations)?
-        },
+        Cmd::Bench {
+            dataset,
+            min_tokens,
+            negatives,
+            file_level,
+            keep_boilerplate,
+            mutations,
+        } => bench::run(
+            &dataset,
+            min_tokens,
+            negatives.as_deref(),
+            file_level,
+            keep_boilerplate,
+            mutations,
+        )?,
     }
     Ok(())
 }

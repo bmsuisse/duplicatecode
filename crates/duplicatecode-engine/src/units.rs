@@ -74,7 +74,12 @@ pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
         return Vec::new();
     };
     let mut units = Vec::new();
-    let mut ctx = Ctx { file, lang, src: source.as_bytes(), units: &mut units };
+    let mut ctx = Ctx {
+        file,
+        lang,
+        src: source.as_bytes(),
+        units: &mut units,
+    };
     ctx.walk(tree.root_node());
     units
 }
@@ -94,7 +99,12 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     parser.set_language(&lang.ts_language()).ok()?;
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
-    let mut ctx = Ctx { file, lang, src: source.as_bytes(), units: &mut units };
+    let mut ctx = Ctx {
+        file,
+        lang,
+        src: source.as_bytes(),
+        units: &mut units,
+    };
     let stem = file.rsplit('/').next().unwrap_or(file);
     let stem = stem.split('.').next().unwrap_or(stem).to_string();
     ctx.emit("file", stem, tree.root_node());
@@ -151,9 +161,7 @@ impl Ctx<'_> {
     fn classify<'t>(&self, node: Node<'t>) -> Option<(&'static str, String, Node<'t>)> {
         let field_name = |n: Node| n.child_by_field_name("name").map(|x| self.text(x));
         match (self.lang, node.kind()) {
-            (Lang::Python, "function_definition") => {
-                Some(("function", field_name(node)?, node))
-            }
+            (Lang::Python, "function_definition") => Some(("function", field_name(node)?, node)),
             (Lang::Python, "class_definition") => Some(("class", field_name(node)?, node)),
             (_, "function_declaration" | "generator_function_declaration") => {
                 Some(("function", field_name(node)?, node))
@@ -165,10 +173,16 @@ impl Ctx<'_> {
             // const foo = () => ... / const foo = function () {...}; also class fields
             (Lang::TypeScript | Lang::Tsx, "variable_declarator" | "public_field_definition") => {
                 let value = node.child_by_field_name("value")?;
-                if matches!(value.kind(), "arrow_function" | "function_expression" | "function") {
+                if matches!(
+                    value.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                ) {
                     Some(("function", field_name(node)?, node))
                 } else if node.kind() == "variable_declarator"
-                    && matches!(value.kind(), "new_expression" | "call_expression" | "object")
+                    && matches!(
+                        value.kind(),
+                        "new_expression" | "call_expression" | "object"
+                    )
                     && is_module_level(node)
                 {
                     // e.g. `export const queryClient = new QueryClient({...})`
@@ -177,9 +191,13 @@ impl Ctx<'_> {
                     None
                 }
             }
-            (Lang::Python, "expression_statement") if node.parent().is_some_and(|p| p.kind() == "module") => {
+            (Lang::Python, "expression_statement")
+                if node.parent().is_some_and(|p| p.kind() == "module") =>
+            {
                 let asg = node.named_child(0).filter(|a| a.kind() == "assignment")?;
-                let left = asg.child_by_field_name("left").filter(|l| l.kind() == "identifier")?;
+                let left = asg
+                    .child_by_field_name("left")
+                    .filter(|l| l.kind() == "identifier")?;
                 let right = asg.child_by_field_name("right")?;
                 matches!(right.kind(), "call" | "dictionary" | "list" | "set")
                     .then(|| ("value", self.text(left), node))
@@ -196,7 +214,13 @@ impl Ctx<'_> {
         let mut f = Features::default();
         self.collect_features(node, &mut f);
         self.norm_tokens(node, &mut f.tokens, false);
-        let Features { tokens, callees, literals, api, kinds } = f;
+        let Features {
+            tokens,
+            callees,
+            literals,
+            api,
+            kinds,
+        } = f;
         let fingerprint = kgram_hashes(&tokens, KGRAM);
         let fingerprint2 = kgram_hashes(&tokens, 2);
         let mut stmts = Vec::new();
@@ -211,7 +235,8 @@ impl Ctx<'_> {
             shape_seq.push(sh);
         }
         let boilerplate = is_boilerplate(&name) || (kind == "class" && self.fields_only(node));
-        let is_test = is_test_path(self.file) || name.starts_with("test_") || name.starts_with("Test");
+        let is_test =
+            is_test_path(self.file) || name.starts_with("test_") || name.starts_with("Test");
         let name_parts = split_identifier(&name).into_iter().collect();
         self.units.push(Unit {
             file: self.file.to_string(),
@@ -240,19 +265,28 @@ impl Ctx<'_> {
 
     /// A class that only declares fields (data model / DTO): no methods, no logic.
     fn fields_only(&self, class: Node) -> bool {
-        let Some(body) = class.child_by_field_name("body") else { return false };
+        let Some(body) = class.child_by_field_name("body") else {
+            return false;
+        };
         let mut fields = 0;
         for i in 0..body.named_child_count() {
-            let Some(m) = body.named_child(i as u32) else { continue };
+            let Some(m) = body.named_child(i as u32) else {
+                continue;
+            };
             match m.kind() {
                 "comment" | "pass_statement" | "decorator" => {}
                 "expression_statement" => match m.named_child(0).map(|e| e.kind()) {
-                    Some("assignment" | "string" | "ellipsis" | "concatenated_string") => fields += 1,
+                    Some("assignment" | "string" | "ellipsis" | "concatenated_string") => {
+                        fields += 1
+                    }
                     _ => return false,
                 },
                 "public_field_definition" | "property_signature" => {
                     if m.child_by_field_name("value").is_some_and(|v| {
-                        matches!(v.kind(), "arrow_function" | "function_expression" | "function")
+                        matches!(
+                            v.kind(),
+                            "arrow_function" | "function_expression" | "function"
+                        )
                     }) {
                         return false;
                     }
@@ -279,19 +313,29 @@ impl Ctx<'_> {
         match node.kind() {
             "debugger_statement" => true,
             "expression_statement" => {
-                let Some(e) = node.named_child(0) else { return false };
+                let Some(e) = node.named_child(0) else {
+                    return false;
+                };
                 if !matches!(e.kind(), "call" | "call_expression") {
                     return false;
                 }
-                let Some(f) = e.child_by_field_name("function") else { return false };
+                let Some(f) = e.child_by_field_name("function") else {
+                    return false;
+                };
                 match f.kind() {
                     "identifier" => matches!(self.text(f).as_str(), "print" | "pprint"),
                     "attribute" | "member_expression" => {
-                        let Some(obj) = f.child_by_field_name("object") else { return false };
+                        let Some(obj) = f.child_by_field_name("object") else {
+                            return false;
+                        };
                         let name = match obj.kind() {
                             "identifier" => self.text(obj),
                             "attribute" | "member_expression" => obj
-                                .child_by_field_name(if obj.kind() == "attribute" { "attribute" } else { "property" })
+                                .child_by_field_name(if obj.kind() == "attribute" {
+                                    "attribute"
+                                } else {
+                                    "property"
+                                })
                                 .map(|x| self.text(x))
                                 .unwrap_or_default(),
                             _ => String::new(),
@@ -318,20 +362,33 @@ impl Ctx<'_> {
                 return None;
             }
             let asg = a.named_child(0).filter(|x| x.kind() == "assignment")?;
-            (asg.child_by_field_name("left")?, asg.child_by_field_name("right")?)
+            (
+                asg.child_by_field_name("left")?,
+                asg.child_by_field_name("right")?,
+            )
         } else {
             if a.kind() != "lexical_declaration" || a.named_child_count() != 1 {
                 return None;
             }
-            let d = a.named_child(0).filter(|x| x.kind() == "variable_declarator")?;
-            (d.child_by_field_name("name")?, d.child_by_field_name("value")?)
+            let d = a
+                .named_child(0)
+                .filter(|x| x.kind() == "variable_declarator")?;
+            (
+                d.child_by_field_name("name")?,
+                d.child_by_field_name("value")?,
+            )
         };
-        if matches!(value.kind(), "list_comprehension" | "set_comprehension" | "dictionary_comprehension") {
+        if matches!(
+            value.kind(),
+            "list_comprehension" | "set_comprehension" | "dictionary_comprehension"
+        ) {
             return None; // keep the loop-shaped form (see comprehension_tokens)
         }
         let ret = b.named_child(0)?;
-        (name.kind() == "identifier" && ret.kind() == "identifier" && self.text(name) == self.text(ret))
-            .then_some(value)
+        (name.kind() == "identifier"
+            && ret.kind() == "identifier"
+            && self.text(name) == self.text(ret))
+        .then_some(value)
     }
 
     /// Normalized leaf tokens of `node`. Identifiers/literals are abstracted; comprehensions are
@@ -344,19 +401,28 @@ impl Ctx<'_> {
             return;
         }
         match kind {
-            "string" | "template_string" | "string_literal" | "concatenated_string" => out.push("STR".into()),
-            "integer" | "float" | "number" => out.push("NUM".into()),
-            "identifier" | "property_identifier" | "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern" | "type_identifier"
-            | "private_property_identifier" => out.push("ID".into()),
-            "list_comprehension" | "set_comprehension" | "dictionary_comprehension" | "generator_expression" => {
-                self.comprehension_tokens(node, out)
+            "string" | "template_string" | "string_literal" | "concatenated_string" => {
+                out.push("STR".into())
             }
+            "integer" | "float" | "number" => out.push("NUM".into()),
+            "identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+            | "type_identifier"
+            | "private_property_identifier" => out.push("ID".into()),
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => self.comprehension_tokens(node, out),
             // `return [e for ...]` reads like `r = []; for ...: r.append(e); return r`
             "return_statement"
                 if self.lang == Lang::Python
                     && node.named_child(0).is_some_and(|e| {
-                        matches!(e.kind(), "list_comprehension" | "set_comprehension" | "dictionary_comprehension")
+                        matches!(
+                            e.kind(),
+                            "list_comprehension" | "set_comprehension" | "dictionary_comprehension"
+                        )
                     }) =>
             {
                 out.extend(["ID", "="].map(String::from));
@@ -475,7 +541,10 @@ impl Ctx<'_> {
     /// Statements of a unit in source order: every child of a block, at any depth. A statement
     /// holds the tokens of its own header (nested blocks are their own statements).
     fn statements(&self, node: Node, out: &mut Vec<Stmt>) {
-        let blockish = matches!(node.kind(), "block" | "statement_block" | "module" | "program");
+        let blockish = matches!(
+            node.kind(),
+            "block" | "statement_block" | "module" | "program"
+        );
         let n = node.child_count();
         let mut i = 0;
         while i < n {
@@ -500,16 +569,24 @@ impl Ctx<'_> {
                 if !self.comprehension_stmts(c, out) {
                     let mut tokens = Vec::new();
                     self.norm_tokens(c, &mut tokens, true);
-                    out.push(Stmt { tokens, shape: shape_of(c) });
+                    out.push(Stmt {
+                        tokens,
+                        shape: shape_of(c),
+                    });
                 }
             } else if node.kind() == "arrow_function"
-                && node.child_by_field_name("body").is_some_and(|b| b.id() == c.id())
+                && node
+                    .child_by_field_name("body")
+                    .is_some_and(|b| b.id() == c.id())
                 && c.kind() != "statement_block"
             {
                 // expression-bodied arrow function: the body expression acts as a statement
                 let mut tokens = Vec::new();
                 self.norm_tokens(c, &mut tokens, true);
-                out.push(Stmt { tokens, shape: vec!["return".into(), shape_of(c).join(">")] });
+                out.push(Stmt {
+                    tokens,
+                    shape: vec!["return".into(), shape_of(c).join(">")],
+                });
             }
             self.statements(c, out);
             i += 1;
@@ -522,18 +599,28 @@ impl Ctx<'_> {
             return false;
         }
         let is_comp = |k: &str| {
-            matches!(k, "list_comprehension" | "set_comprehension" | "dictionary_comprehension")
+            matches!(
+                k,
+                "list_comprehension" | "set_comprehension" | "dictionary_comprehension"
+            )
         };
         let (target, comp, is_return) = match c.kind() {
             "expression_statement" => {
-                let Some(a) = c.named_child(0).filter(|a| a.kind() == "assignment") else { return false };
-                let (Some(l), Some(r)) = (a.child_by_field_name("left"), a.child_by_field_name("right")) else {
+                let Some(a) = c.named_child(0).filter(|a| a.kind() == "assignment") else {
+                    return false;
+                };
+                let (Some(l), Some(r)) = (
+                    a.child_by_field_name("left"),
+                    a.child_by_field_name("right"),
+                ) else {
                     return false;
                 };
                 (Some(l), r, false)
             }
             "return_statement" => {
-                let Some(e) = c.named_child(0) else { return false };
+                let Some(e) = c.named_child(0) else {
+                    return false;
+                };
                 (None, e, true)
             }
             _ => return false,
@@ -549,7 +636,9 @@ impl Ctx<'_> {
         tokens.extend(["=", "[", "]"].map(String::from));
         out.push(Stmt {
             tokens,
-            shape: ["expression_statement", "assignment", "list"].map(String::from).to_vec(),
+            shape: ["expression_statement", "assignment", "list"]
+                .map(String::from)
+                .to_vec(),
         });
         for i in 0..comp.child_count() {
             let Some(cl) = comp.child(i) else { continue };
@@ -559,12 +648,24 @@ impl Ctx<'_> {
                 "for_in_clause" => {
                     self.for_header(cl, &mut tokens);
                     shape = vec!["for_statement".to_string()];
-                    shape.extend(cl.child_by_field_name("right").map(shape_of).unwrap_or_default().into_iter().take(3));
+                    shape.extend(
+                        cl.child_by_field_name("right")
+                            .map(shape_of)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .take(3),
+                    );
                 }
                 "if_clause" => {
                     self.if_header(cl, &mut tokens);
                     shape = vec!["if_statement".to_string()];
-                    shape.extend(cl.named_child(0).map(shape_of).unwrap_or_default().into_iter().take(3));
+                    shape.extend(
+                        cl.named_child(0)
+                            .map(shape_of)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .take(3),
+                    );
                 }
                 _ => continue,
             }
@@ -575,11 +676,16 @@ impl Ctx<'_> {
             self.append_stmt(comp.kind(), body, &mut tokens);
             out.push(Stmt {
                 tokens,
-                shape: ["expression_statement", "call", "attribute"].map(String::from).to_vec(),
+                shape: ["expression_statement", "call", "attribute"]
+                    .map(String::from)
+                    .to_vec(),
             });
         }
         if is_return {
-            out.push(Stmt { tokens: vec!["return".into(), "ID".into()], shape: vec!["return_statement".into()] });
+            out.push(Stmt {
+                tokens: vec!["return".into(), "ID".into()],
+                shape: vec!["return_statement".into()],
+            });
         }
         true
     }
@@ -602,7 +708,11 @@ impl Ctx<'_> {
                 }
             }
             "attribute" | "member_expression" => {
-                let field = if kind == "attribute" { "attribute" } else { "property" };
+                let field = if kind == "attribute" {
+                    "attribute"
+                } else {
+                    "property"
+                };
                 if let Some(a) = node.child_by_field_name(field) {
                     f.api.insert(self.text(a).to_lowercase());
                 }
@@ -629,7 +739,10 @@ impl Ctx<'_> {
         }
         // comprehensions count as the loop/branch nodes of their expanded form
         match kind {
-            "list_comprehension" | "set_comprehension" | "dictionary_comprehension" | "generator_expression" => {}
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => {}
             "for_in_clause" => *f.kinds.entry("for_statement".into()).or_insert(0) += 1,
             "if_clause" => *f.kinds.entry("if_statement".into()).or_insert(0) += 1,
             _ if node.is_named() => *f.kinds.entry(kind.to_string()).or_insert(0) += 1,
@@ -696,7 +809,12 @@ fn shape_of(node: Node) -> Vec<String> {
             .or_else(|| {
                 (0..cur.named_child_count())
                     .filter_map(|i| cur.named_child(i as u32))
-                    .find(|c| !matches!(c.kind(), "identifier" | "comment" | "block" | "statement_block"))
+                    .find(|c| {
+                        !matches!(
+                            c.kind(),
+                            "identifier" | "comment" | "block" | "statement_block"
+                        )
+                    })
             });
         match next {
             Some(n) if !matches!(n.kind(), "block" | "statement_block") => {
@@ -711,15 +829,24 @@ fn shape_of(node: Node) -> Vec<String> {
 
 /// `const x = ...` / `export const x = ...` directly at the top level of a TS/JS file.
 fn is_module_level(declarator: Node) -> bool {
-    let Some(decl) = declarator.parent().filter(|d| d.kind() == "lexical_declaration") else { return false };
-    let Some(up) = decl.parent() else { return false };
-    up.kind() == "program" || (up.kind() == "export_statement" && up.parent().is_some_and(|p| p.kind() == "program"))
+    let Some(decl) = declarator
+        .parent()
+        .filter(|d| d.kind() == "lexical_declaration")
+    else {
+        return false;
+    };
+    let Some(up) = decl.parent() else {
+        return false;
+    };
+    up.kind() == "program"
+        || (up.kind() == "export_statement" && up.parent().is_some_and(|p| p.kind() == "program"))
 }
 
 fn is_test_path(file: &str) -> bool {
     let f = file.replace('\\', "/");
     let base = f.rsplit('/').next().unwrap_or(&f);
-    f.split('/').any(|c| matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec"))
+    f.split('/')
+        .any(|c| matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec"))
         || base.starts_with("test_")
         || base == "conftest.py"
         || base.ends_with("_test.py")
@@ -752,7 +879,10 @@ mod tests {
     fn python_functions_methods_and_classes() {
         let src = "def f(a: int) -> int:\n    \"\"\"doc\"\"\"\n    return g(a) + 1\n\nclass C:\n    def m(self):\n        return 2\n";
         let u = extract_units("x.py", Lang::Python, src);
-        let names: Vec<_> = u.iter().map(|u| (u.kind.as_str(), u.name.as_str())).collect();
+        let names: Vec<_> = u
+            .iter()
+            .map(|u| (u.kind.as_str(), u.name.as_str()))
+            .collect();
         assert_eq!(names, [("function", "f"), ("class", "C"), ("method", "m")]);
         assert!(u[0].callees.contains("g"));
         // docstring and annotations are dropped
@@ -761,9 +891,13 @@ mod tests {
 
     #[test]
     fn typescript_arrow_and_class() {
-        let src = "export const f = (a: number): number => g(a) + 1;\nexport class K { m(): void {} }\n";
+        let src =
+            "export const f = (a: number): number => g(a) + 1;\nexport class K { m(): void {} }\n";
         let u = extract_units("x.ts", Lang::TypeScript, src);
-        let names: Vec<_> = u.iter().map(|u| (u.kind.as_str(), u.name.as_str())).collect();
+        let names: Vec<_> = u
+            .iter()
+            .map(|u| (u.kind.as_str(), u.name.as_str()))
+            .collect();
         assert_eq!(names, [("function", "f"), ("class", "K"), ("method", "m")]);
     }
 
@@ -779,8 +913,18 @@ mod tests {
         let u = extract_units("x.py", Lang::Python, noisy).remove(0);
         assert!(!u.callees.contains("print") && !u.callees.contains("info"));
         assert_eq!(
-            extract_units("x.ts", Lang::TypeScript, "function f(x: number) { console.log(x); return g(x) + 1; }")[0].tokens,
-            extract_units("x.ts", Lang::TypeScript, "function f(x: number) { return g(x) + 1; }")[0].tokens
+            extract_units(
+                "x.ts",
+                Lang::TypeScript,
+                "function f(x: number) { console.log(x); return g(x) + 1; }"
+            )[0]
+            .tokens,
+            extract_units(
+                "x.ts",
+                Lang::TypeScript,
+                "function f(x: number) { return g(x) + 1; }"
+            )[0]
+            .tokens
         );
     }
 
@@ -800,13 +944,24 @@ mod tests {
 
     #[test]
     fn augmented_assignment_and_temp_return() {
-        assert_eq!(toks("def f(x):\n    x += 1\n    y = g(x)\n    return y\n"), toks("def f(x):\n    x = x + 1\n    y = g(x)\n    return y\n"));
+        assert_eq!(
+            toks("def f(x):\n    x += 1\n    y = g(x)\n    return y\n"),
+            toks("def f(x):\n    x = x + 1\n    y = g(x)\n    return y\n")
+        );
         assert_eq!(
             toks("def f(a, b):\n    r = a + b\n    return r\n"),
             toks("def f(a, b):\n    return a + b\n")
         );
-        let ts1 = extract_units("a.ts", Lang::TypeScript, "function f(a: number) { const r = a * 2; return r; }");
-        let ts2 = extract_units("b.ts", Lang::TypeScript, "function f(a: number) { return a * 2; }");
+        let ts1 = extract_units(
+            "a.ts",
+            Lang::TypeScript,
+            "function f(a: number) { const r = a * 2; return r; }",
+        );
+        let ts2 = extract_units(
+            "b.ts",
+            Lang::TypeScript,
+            "function f(a: number) { return a * 2; }",
+        );
         assert_eq!(ts1[0].tokens, ts2[0].tokens);
         assert_eq!(ts1[0].shape_seq, ts2[0].shape_seq);
     }
@@ -818,15 +973,25 @@ mod tests {
         assert!(u[0].boilerplate);
         let logic = "class Item:\n    id: int\n\n    def total(self):\n        return self.id\n";
         assert!(!extract_units("x.py", Lang::Python, logic)[0].boilerplate);
-        let t = extract_units("tests/test_a.py", Lang::Python, "def helper():\n    return 1\n");
+        let t = extract_units(
+            "tests/test_a.py",
+            Lang::Python,
+            "def helper():\n    return 1\n",
+        );
         assert!(t[0].is_test);
-        assert!(!extract_units("src/a.py", Lang::Python, "def helper():\n    return 1\n")[0].is_test);
+        assert!(
+            !extract_units("src/a.py", Lang::Python, "def helper():\n    return 1\n")[0].is_test
+        );
     }
 
     #[test]
     fn renaming_does_not_change_tokens() {
         let a = extract_units("a.py", Lang::Python, "def f(x):\n    return x + 1\n");
-        let b = extract_units("b.py", Lang::Python, "def other(value):\n    return value + 2\n");
+        let b = extract_units(
+            "b.py",
+            Lang::Python,
+            "def other(value):\n    return value + 2\n",
+        );
         assert_eq!(a[0].tokens, b[0].tokens);
     }
 }

@@ -64,7 +64,14 @@ pub fn apply(m: Mutation, lang: Lang, source: &str) -> String {
         Mutation::LoopToComprehension => apply_one(loop_to_comprehension_edits, lang, source),
         Mutation::Combined => {
             let mut s = source.to_string();
-            for step in [loop_to_comprehension_edits, rename_edits, swap_edits, temp_edits, logging_edits, dead_code_edits] {
+            for step in [
+                loop_to_comprehension_edits,
+                rename_edits,
+                swap_edits,
+                temp_edits,
+                logging_edits,
+                dead_code_edits,
+            ] {
                 s = apply_one(step, lang, &s);
             }
             s
@@ -114,7 +121,11 @@ fn is_function(lang: Lang, n: Node) -> bool {
         Lang::Python => n.kind() == "function_definition",
         _ => matches!(
             n.kind(),
-            "function_declaration" | "method_definition" | "arrow_function" | "function_expression" | "function"
+            "function_declaration"
+                | "method_definition"
+                | "arrow_function"
+                | "function_expression"
+                | "function"
         ),
     }
 }
@@ -155,20 +166,27 @@ fn indent_of(n: Node) -> String {
 /// True when the statement starts its own line (safe to insert a line before it).
 fn starts_line(n: Node, src: &str) -> bool {
     let line_start = src[..n.start_byte()].rfind('\n').map_or(0, |i| i + 1);
-    src[line_start..n.start_byte()].chars().all(|c| c == ' ' || c == '\t')
+    src[line_start..n.start_byte()]
+        .chars()
+        .all(|c| c == ' ' || c == '\t')
 }
 
 // ---- rename ----------------------------------------------------------------------------
 
-const WORDS: [&str; 12] =
-    ["item", "value", "entry", "current", "outcome", "buf", "data", "node", "key", "acc", "part", "cursor"];
+const WORDS: [&str; 12] = [
+    "item", "value", "entry", "current", "outcome", "buf", "data", "node", "key", "acc", "part",
+    "cursor",
+];
 
 fn collect_pattern_idents<'t>(n: Node<'t>, out: &mut Vec<Node<'t>>) {
     if n.kind() == "identifier" {
         out.push(n);
         return;
     }
-    if matches!(n.kind(), "tuple_pattern" | "list_pattern" | "pattern_list" | "tuple" | "list") {
+    if matches!(
+        n.kind(),
+        "tuple_pattern" | "list_pattern" | "pattern_list" | "tuple" | "list"
+    ) {
         for i in 0..n.named_child_count() {
             if let Some(c) = n.named_child(i as u32) {
                 collect_pattern_idents(c, out);
@@ -196,7 +214,9 @@ fn rename_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
                 }
                 if let Some(params) = n.child_by_field_name("parameters") {
                     for i in 0..params.named_child_count() {
-                        let Some(p) = params.named_child(i as u32) else { continue };
+                        let Some(p) = params.named_child(i as u32) else {
+                            continue;
+                        };
                         match p.kind() {
                             "identifier" => nodes.push(p),
                             "default_parameter" | "typed_default_parameter" => {
@@ -204,7 +224,9 @@ fn rename_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
                                     nodes.push(x);
                                 }
                             }
-                            "typed_parameter" | "list_splat_pattern" | "dictionary_splat_pattern" => {
+                            "typed_parameter"
+                            | "list_splat_pattern"
+                            | "dictionary_splat_pattern" => {
                                 if let Some(x) = p.named_child(0) {
                                     if x.kind() == "identifier" {
                                         nodes.push(x);
@@ -216,7 +238,10 @@ fn rename_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
                     }
                 }
             }
-            (Lang::Python, "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause") => {
+            (
+                Lang::Python,
+                "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause",
+            ) => {
                 if let Some(l) = n.child_by_field_name("left") {
                     collect_pattern_idents(l, &mut nodes);
                 }
@@ -224,7 +249,9 @@ fn rename_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
             (Lang::Python, "as_pattern") => {
                 if let Some(l) = n.child_by_field_name("alias") {
                     collect_pattern_idents(l, &mut nodes);
-                } else if let Some(l) = n.named_child(n.named_child_count().saturating_sub(1) as u32) {
+                } else if let Some(l) =
+                    n.named_child(n.named_child_count().saturating_sub(1) as u32)
+                {
                     collect_pattern_idents(l, &mut nodes);
                 }
             }
@@ -279,14 +306,26 @@ fn rename_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
             }
         }
         if let Some(new) = map.get(text(n, src)) {
-            edits.push(Edit { start: n.start_byte(), end: n.end_byte(), text: new.clone() });
+            edits.push(Edit {
+                start: n.start_byte(),
+                end: n.end_byte(),
+                text: new.clone(),
+            });
         }
     });
     // 3. the units' own names
-    let generic = if lang == Lang::Python { "run_task" } else { "runTask" };
+    let generic = if lang == Lang::Python {
+        "run_task"
+    } else {
+        "runTask"
+    };
     for (i, n) in fn_names.iter().enumerate() {
         if !edits.iter().any(|e| e.start == n.start_byte()) {
-            edits.push(Edit { start: n.start_byte(), end: n.end_byte(), text: format!("{generic}_{i}") });
+            edits.push(Edit {
+                start: n.start_byte(),
+                end: n.end_byte(),
+                text: format!("{generic}_{i}"),
+            });
         }
     }
     edits
@@ -323,8 +362,16 @@ fn swap_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
                 && !is_docstring(lang, a)
                 && idents_of(a, src).is_disjoint(&idents_of(b, src))
             {
-                edits.push(Edit { start: a.start_byte(), end: a.end_byte(), text: text(b, src).to_string() });
-                edits.push(Edit { start: b.start_byte(), end: b.end_byte(), text: text(a, src).to_string() });
+                edits.push(Edit {
+                    start: a.start_byte(),
+                    end: a.end_byte(),
+                    text: text(b, src).to_string(),
+                });
+                edits.push(Edit {
+                    start: b.start_byte(),
+                    end: b.end_byte(),
+                    text: text(a, src).to_string(),
+                });
                 i += 2;
             } else {
                 i += 1;
@@ -343,12 +390,19 @@ fn temp_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
             return;
         }
         let Some(expr) = n.named_child(0) else { return };
-        if matches!(expr.kind(), "identifier" | "true" | "false" | "none" | "null") {
+        if matches!(
+            expr.kind(),
+            "identifier" | "true" | "false" | "none" | "null"
+        ) {
             return;
         }
         let ind = indent_of(n);
         let e = text(expr, src);
-        let (tmp, semi) = if lang == Lang::Python { ("result_value", "") } else { ("resultValue", ";") };
+        let (tmp, semi) = if lang == Lang::Python {
+            ("result_value", "")
+        } else {
+            ("resultValue", ";")
+        };
         let decl = if lang == Lang::Python { "" } else { "const " };
         edits.push(Edit {
             start: n.start_byte(),
@@ -382,8 +436,12 @@ fn loop_to_comprehension_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
 
 /// `acc = []` + `for t in it: [if c:] acc.append(e)`  ->  `acc = [e for t in it if c]`.
 fn comprehension_edit(init: Node, lp: Node, src: &str) -> Option<Edit> {
-    let asg = init.named_child(0).filter(|a| init.kind() == "expression_statement" && a.kind() == "assignment")?;
-    let acc = asg.child_by_field_name("left").filter(|l| l.kind() == "identifier")?;
+    let asg = init
+        .named_child(0)
+        .filter(|a| init.kind() == "expression_statement" && a.kind() == "assignment")?;
+    let acc = asg
+        .child_by_field_name("left")
+        .filter(|l| l.kind() == "identifier")?;
     let right = asg.child_by_field_name("right")?;
     if right.kind() != "list" || right.named_child_count() != 0 || lp.kind() != "for_statement" {
         return None;
@@ -411,8 +469,12 @@ fn comprehension_edit(init: Node, lp: Node, src: &str) -> Option<Edit> {
     } else {
         (None, body[0])
     };
-    let call = append_stmt.named_child(0).filter(|c| append_stmt.kind() == "expression_statement" && c.kind() == "call")?;
-    let f = call.child_by_field_name("function").filter(|f| f.kind() == "attribute")?;
+    let call = append_stmt
+        .named_child(0)
+        .filter(|c| append_stmt.kind() == "expression_statement" && c.kind() == "call")?;
+    let f = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "attribute")?;
     let obj = f.child_by_field_name("object")?;
     let attr = f.child_by_field_name("attribute")?;
     if text(obj, src) != text(acc, src) || text(attr, src) != "append" {
@@ -423,7 +485,9 @@ fn comprehension_edit(init: Node, lp: Node, src: &str) -> Option<Edit> {
         return None;
     }
     let elt = args.named_child(0)?;
-    let cond_txt = cond.map(|c| format!(" if {}", text(c, src))).unwrap_or_default();
+    let cond_txt = cond
+        .map(|c| format!(" if {}", text(c, src)))
+        .unwrap_or_default();
     Some(Edit {
         start: init.start_byte(),
         end: lp.end_byte(),
@@ -445,14 +509,25 @@ fn insert_before(lang: Lang, n: Node, src: &str, stmt: &str) -> Option<Edit> {
         return None;
     }
     let _ = lang;
-    Some(Edit { start: n.start_byte(), end: n.start_byte(), text: format!("{stmt}\n{}", indent_of(n)) })
+    Some(Edit {
+        start: n.start_byte(),
+        end: n.start_byte(),
+        text: format!("{stmt}\n{}", indent_of(n)),
+    })
 }
 
 fn logging_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
-    let stmt = if lang == Lang::Python { "print(\"debug\")" } else { "console.log(\"debug\");" };
+    let stmt = if lang == Lang::Python {
+        "print(\"debug\")"
+    } else {
+        "console.log(\"debug\");"
+    };
     let mut edits = Vec::new();
     for body in function_bodies(lang, root) {
-        if let Some(first) = statements(body).into_iter().find(|s| !is_docstring(lang, *s)) {
+        if let Some(first) = statements(body)
+            .into_iter()
+            .find(|s| !is_docstring(lang, *s))
+        {
             edits.extend(insert_before(lang, first, src, stmt));
         }
     }
@@ -465,10 +540,17 @@ fn logging_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
 }
 
 fn dead_code_edits(lang: Lang, root: Node, src: &str) -> Vec<Edit> {
-    let stmt = if lang == Lang::Python { "unused_marker = 42" } else { "const unusedMarker = 42;" };
+    let stmt = if lang == Lang::Python {
+        "unused_marker = 42"
+    } else {
+        "const unusedMarker = 42;"
+    };
     let mut edits = Vec::new();
     for body in function_bodies(lang, root) {
-        if let Some(first) = statements(body).into_iter().find(|s| !is_docstring(lang, *s)) {
+        if let Some(first) = statements(body)
+            .into_iter()
+            .find(|s| !is_docstring(lang, *s))
+        {
             edits.extend(insert_before(lang, first, src, stmt));
         }
     }
@@ -490,7 +572,11 @@ mod tests {
             // no parse errors
             let mut p = Parser::new();
             p.set_language(&Lang::Python.ts_language()).unwrap();
-            assert!(!p.parse(&out, None).unwrap().root_node().has_error(), "{}: {out}", m.name());
+            assert!(
+                !p.parse(&out, None).unwrap().root_node().has_error(),
+                "{}: {out}",
+                m.name()
+            );
         }
     }
 
@@ -529,7 +615,11 @@ mod tests {
             let out = apply(m, Lang::TypeScript, ts);
             let mut p = Parser::new();
             p.set_language(&Lang::TypeScript.ts_language()).unwrap();
-            assert!(!p.parse(&out, None).unwrap().root_node().has_error(), "{}: {out}", m.name());
+            assert!(
+                !p.parse(&out, None).unwrap().root_node().has_error(),
+                "{}: {out}",
+                m.name()
+            );
         }
     }
 }

@@ -1,0 +1,43 @@
+name: CI
+
+# Pushes to main run this via release.yml's `test` job (workflow_call), which
+# gates the auto-release on it -- so no separate `push: main` trigger here.
+on:
+  pull_request:
+  workflow_call:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  # Proves the exact install path users get: build the wheel and
+  # `uv tool install` it, then run the installed binary.
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uvx maturin build --release --out dist
+      - run: uv tool install dist/*.whl
+      - run: duplicatecode --version
+      - run: duplicatecode scan dataset --skip-tests

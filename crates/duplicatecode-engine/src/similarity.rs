@@ -21,7 +21,10 @@ pub fn containment<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
 
 /// Cosine similarity of two count histograms.
 pub fn cosine(a: &BTreeMap<String, u32>, b: &BTreeMap<String, u32>) -> f64 {
-    let dot: f64 = a.iter().filter_map(|(k, x)| b.get(k).map(|y| *x as f64 * *y as f64)).sum();
+    let dot: f64 = a
+        .iter()
+        .filter_map(|(k, x)| b.get(k).map(|y| *x as f64 * *y as f64))
+        .sum();
     let na: f64 = a.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     let nb: f64 = b.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
     if na == 0.0 || nb == 0.0 {
@@ -36,7 +39,10 @@ pub fn multiset_dice<K: Ord>(a: &BTreeMap<K, u32>, b: &BTreeMap<K, u32>) -> f64 
     if total == 0 {
         return 0.0;
     }
-    let inter: u32 = a.iter().filter_map(|(k, x)| b.get(k).map(|y| *x.min(y))).sum();
+    let inter: u32 = a
+        .iter()
+        .filter_map(|(k, x)| b.get(k).map(|y| *x.min(y)))
+        .sum();
     2.0 * inter as f64 / total as f64
 }
 
@@ -49,7 +55,11 @@ pub fn lcs_ratio<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
     for x in a {
         let mut cur = vec![0usize; b.len() + 1];
         for (j, y) in b.iter().enumerate() {
-            cur[j + 1] = if x == y { prev[j] + 1 } else { cur[j].max(prev[j + 1]) };
+            cur[j + 1] = if x == y {
+                prev[j] + 1
+            } else {
+                cur[j].max(prev[j + 1])
+            };
         }
         prev = cur;
     }

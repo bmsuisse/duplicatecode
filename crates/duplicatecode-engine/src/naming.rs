@@ -36,9 +36,18 @@ mod tests {
 
     #[test]
     fn splits_camel_snake_and_acronyms() {
-        assert_eq!(split_identifier("fetchUserById"), ["fetch", "user", "by", "id"]);
-        assert_eq!(split_identifier("fetch_user_by_id"), ["fetch", "user", "by", "id"]);
-        assert_eq!(split_identifier("parseHTTPResponse"), ["parse", "http", "response"]);
+        assert_eq!(
+            split_identifier("fetchUserById"),
+            ["fetch", "user", "by", "id"]
+        );
+        assert_eq!(
+            split_identifier("fetch_user_by_id"),
+            ["fetch", "user", "by", "id"]
+        );
+        assert_eq!(
+            split_identifier("parseHTTPResponse"),
+            ["parse", "http", "response"]
+        );
         assert_eq!(split_identifier("_private"), ["private"]);
     }
 }

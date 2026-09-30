@@ -41,14 +41,28 @@ fn strict_targets(dataset: &Path) -> Result<HashMap<String, String>> {
 fn load_combos(dataset: &Path, file_level: bool, keep_boilerplate: bool) -> Result<Combos> {
     let targets = strict_targets(dataset)?;
     let mut combos = Combos::new();
-    for (set, dir) in [("strict", "impls"), ("loose", "impls-loose"), ("hard", "impls-hard")] {
-        let Ok(rd) = std::fs::read_dir(dataset.join(dir)) else { continue };
-        let mut models: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    for (set, dir) in [
+        ("strict", "impls"),
+        ("loose", "impls-loose"),
+        ("hard", "impls-hard"),
+    ] {
+        let Ok(rd) = std::fs::read_dir(dataset.join(dir)) else {
+            continue;
+        };
+        let mut models: Vec<_> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
         models.sort();
         for mdir in models {
             let model = mdir.file_name().unwrap().to_string_lossy().to_string();
             let mut items = Vec::new();
-            for u in if file_level { load_file_units(&mdir) } else { load_units(&mdir) } {
+            for u in if file_level {
+                load_file_units(&mdir)
+            } else {
+                load_units(&mdir)
+            } {
                 let group = if set == "strict" {
                     let base = u.file.rsplit('/').next().unwrap_or(&u.file);
                     targets.get(base).cloned()
@@ -77,21 +91,47 @@ const SCORERS: [(&str, Pick); 5] = [
     ("combined", |s| s.combined),
 ];
 
-pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_level: bool, keep_boilerplate: bool, mutations: bool) -> Result<()> {
+pub fn run(
+    dataset: &Path,
+    min_tokens: usize,
+    negatives: Option<&Path>,
+    file_level: bool,
+    keep_boilerplate: bool,
+    mutations: bool,
+) -> Result<()> {
     let combos = load_combos(dataset, file_level, keep_boilerplate)?;
-    println!("level: {}", if file_level { "whole files" } else { "functions/classes" });
+    println!(
+        "level: {}",
+        if file_level {
+            "whole files"
+        } else {
+            "functions/classes"
+        }
+    );
     for (name, items) in &combos {
         println!("loaded {name}: {} units", items.len());
     }
 
     // (category label, predicate over (query combo, candidate combo))
     let categories: [(&str, fn(&str, &str) -> bool); 6] = [
-        ("strict~strict (cross-model)", |a, b| pair(a, b, "strict", "strict") && a != b),
-        ("loose~loose  (cross-model)", |a, b| pair(a, b, "loose", "loose") && a != b),
-        ("hard~hard    (cross-model)", |a, b| pair(a, b, "hard", "hard") && a != b),
-        ("strict~loose (cross-model)", |a, b| pair(a, b, "strict", "loose") && model(a) != model(b)),
-        ("strict~hard  (cross-model)", |a, b| pair(a, b, "strict", "hard") && model(a) != model(b)),
-        ("loose~hard   (cross-model)", |a, b| pair(a, b, "loose", "hard") && model(a) != model(b)),
+        ("strict~strict (cross-model)", |a, b| {
+            pair(a, b, "strict", "strict") && a != b
+        }),
+        ("loose~loose  (cross-model)", |a, b| {
+            pair(a, b, "loose", "loose") && a != b
+        }),
+        ("hard~hard    (cross-model)", |a, b| {
+            pair(a, b, "hard", "hard") && a != b
+        }),
+        ("strict~loose (cross-model)", |a, b| {
+            pair(a, b, "strict", "loose") && model(a) != model(b)
+        }),
+        ("strict~hard  (cross-model)", |a, b| {
+            pair(a, b, "strict", "hard") && model(a) != model(b)
+        }),
+        ("loose~hard   (cross-model)", |a, b| {
+            pair(a, b, "loose", "hard") && model(a) != model(b)
+        }),
     ];
 
     for family in ["python", "typescript"] {
@@ -110,19 +150,28 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_lev
                     if !pred(an, bn) {
                         continue;
                     }
-                    for q in aitems.iter().filter(|i| i.unit.lang.family() == family && i.unit.token_count() >= min_tokens) {
+                    for q in aitems.iter().filter(|i| {
+                        i.unit.lang.family() == family && i.unit.token_count() >= min_tokens
+                    }) {
                         let cands: Vec<&Item> = bitems
                             .iter()
-                            .filter(|c| c.unit.lang.family() == family && c.unit.token_count() >= min_tokens)
+                            .filter(|c| {
+                                c.unit.lang.family() == family && c.unit.token_count() >= min_tokens
+                            })
                             .collect();
                         if cands.is_empty() {
                             continue;
                         }
                         total += 1;
-                        let scored: Vec<(&Item, Scores)> =
-                            cands.iter().map(|c| (*c, score(&q.unit, &c.unit))).collect();
+                        let scored: Vec<(&Item, Scores)> = cands
+                            .iter()
+                            .map(|c| (*c, score(&q.unit, &c.unit)))
+                            .collect();
                         for (k, (_, pick)) in SCORERS.iter().enumerate() {
-                            let best = scored.iter().max_by(|x, y| pick(&x.1).total_cmp(&pick(&y.1))).unwrap();
+                            let best = scored
+                                .iter()
+                                .max_by(|x, y| pick(&x.1).total_cmp(&pick(&y.1)))
+                                .unwrap();
                             if best.0.group == q.group {
                                 correct[k] += 1;
                             }
@@ -139,7 +188,10 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_lev
             for c in correct {
                 print!("{:>9.0}%", 100.0 * c as f64 / total.max(1) as f64);
             }
-            println!("{:>11.0}%   (n={total})", 100.0 * top3 as f64 / total.max(1) as f64);
+            println!(
+                "{:>11.0}%   (n={total})",
+                100.0 * top3 as f64 / total.max(1) as f64
+            );
         }
     }
     pair_report(&combos, &categories, min_tokens);
@@ -154,26 +206,55 @@ pub fn run(dataset: &Path, min_tokens: usize, negatives: Option<&Path>, file_lev
 
 /// Threshold sweep: recall on true (same-task, cross-model) pairs vs. false alarms against an
 /// unrelated corpus. Also prints the highest-scoring corpus hits for manual inspection.
-fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &Path, min_tokens: usize) {
+fn sweep(
+    combos: &Combos,
+    categories: &[(&str, fn(&str, &str) -> bool)],
+    neg: &Path,
+    min_tokens: usize,
+) {
     use rayon::prelude::*;
     let corpus = Corpus::new(load_units(neg));
-    let opts = MatchOptions { threshold: 0.0, min_tokens, top_n: 1, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_tests: false, skip_boilerplate: true };
-    println!("\n== threshold sweep vs. negatives corpus {} ({} units) ==", neg.display(), corpus.units().len());
+    let opts = MatchOptions {
+        threshold: 0.0,
+        min_tokens,
+        top_n: 1,
+        min_lines: 0,
+        min_name: 0.0,
+        weights: Weights::default(),
+        skip_tests: false,
+        skip_boilerplate: true,
+    };
+    println!(
+        "\n== threshold sweep vs. negatives corpus {} ({} units) ==",
+        neg.display(),
+        corpus.units().len()
+    );
 
     // best combined score per dataset unit against the negatives (+ which corpus unit)
     let mut best: HashMap<(String, String, u32), (f64, String, &'static str)> = HashMap::new();
     let queries: Vec<(&String, &Item)> = combos
         .iter()
-        .flat_map(|(n, items)| items.iter().filter(|i| i.unit.token_count() >= min_tokens).map(move |i| (n, i)))
+        .flat_map(|(n, items)| {
+            items
+                .iter()
+                .filter(|i| i.unit.token_count() >= min_tokens)
+                .map(move |i| (n, i))
+        })
         .collect();
     let results: Vec<_> = queries
         .par_iter()
         .map(|(n, q)| {
             let (top, who) = match corpus.best_for(&q.unit, opts).first() {
-                Some((c, sc)) => (sc.combined, format!("{}:{} {}", c.file, c.start_line, c.name)),
+                Some((c, sc)) => (
+                    sc.combined,
+                    format!("{}:{} {}", c.file, c.start_line, c.name),
+                ),
                 None => (0.0, String::new()),
             };
-            ((n.to_string(), q.unit.file.clone(), q.unit.start_line), (top, who, q.unit.lang.family()))
+            (
+                (n.to_string(), q.unit.file.clone(), q.unit.start_line),
+                (top, who, q.unit.lang.family()),
+            )
         })
         .collect();
     best.extend(results);
@@ -200,7 +281,9 @@ fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &P
                     if !pred(an, bn) {
                         continue;
                     }
-                    for q in aitems.iter().filter(|i| i.unit.lang.family() == family && i.unit.token_count() >= min_tokens) {
+                    for q in aitems.iter().filter(|i| {
+                        i.unit.lang.family() == family && i.unit.token_count() >= min_tokens
+                    }) {
                         let best_true = bitems
                             .iter()
                             .filter(|c| c.group == q.group && c.unit.token_count() >= min_tokens)
@@ -226,7 +309,10 @@ fn sweep(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], neg: &P
         let n = items.len().max(1);
         print!("{:<34}", format!("{family} FALSE-ALARM rate (queries)"));
         for t in thresholds {
-            print!("{:>6.0}%", 100.0 * items.iter().filter(|v| v.0 >= t).count() as f64 / n as f64);
+            print!(
+                "{:>6.0}%",
+                100.0 * items.iter().filter(|v| v.0 >= t).count() as f64 / n as f64
+            );
         }
         println!("  (n={})", items.len());
     }
@@ -254,7 +340,11 @@ struct Sample {
 
 const FAMILIES: [&str; 2] = ["python", "typescript"];
 
-fn collect_samples(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], min_tokens: usize) -> Vec<Sample> {
+fn collect_samples(
+    combos: &Combos,
+    categories: &[(&str, fn(&str, &str) -> bool)],
+    min_tokens: usize,
+) -> Vec<Sample> {
     let mut out = Vec::new();
     for (cat, (_, pred)) in categories.iter().enumerate() {
         for (an, aitems) in combos {
@@ -263,9 +353,13 @@ fn collect_samples(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)
                     continue;
                 }
                 for q in aitems.iter().filter(|i| i.unit.token_count() >= min_tokens) {
-                    let fam = FAMILIES.iter().position(|f| *f == q.unit.lang.family()).unwrap();
+                    let fam = FAMILIES
+                        .iter()
+                        .position(|f| *f == q.unit.lang.family())
+                        .unwrap();
                     for c in bitems.iter().filter(|c| {
-                        c.unit.lang.family() == q.unit.lang.family() && c.unit.token_count() >= min_tokens
+                        c.unit.lang.family() == q.unit.lang.family()
+                            && c.unit.token_count() >= min_tokens
                     }) {
                         out.push(Sample {
                             cat,
@@ -292,7 +386,11 @@ fn fit(samples: &[&Sample]) -> Weights {
     let neg = samples.iter().filter(|s| !s.y).count().max(1) as f64;
     let n = samples.len() as f64;
     let (wp, wn) = (n / (2.0 * pos), n / (2.0 * neg));
-    let mut w = Weights { bias: 0.0, w: [0.0; N_FEATURES], name_floor: 0.5 };
+    let mut w = Weights {
+        bias: 0.0,
+        w: [0.0; N_FEATURES],
+        name_floor: 0.5,
+    };
     for _ in 0..2500 {
         let mut gb = 0.0;
         let mut gw = [0.0; N_FEATURES];
@@ -334,8 +432,16 @@ fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], m
     let samples = collect_samples(combos, categories, min_tokens);
     let refs: Vec<&Sample> = samples.iter().collect();
     // 2-fold cross-validation over task parity so the fitted score is never scored on tasks it saw.
-    let fit_even = fit(&refs.iter().copied().filter(|s| s.task % 2 == 0).collect::<Vec<_>>());
-    let fit_odd = fit(&refs.iter().copied().filter(|s| s.task % 2 == 1).collect::<Vec<_>>());
+    let fit_even = fit(&refs
+        .iter()
+        .copied()
+        .filter(|s| s.task % 2 == 0)
+        .collect::<Vec<_>>());
+    let fit_odd = fit(&refs
+        .iter()
+        .copied()
+        .filter(|s| s.task % 2 == 1)
+        .collect::<Vec<_>>());
     let cv = |s: &Sample| apply(if s.task % 2 == 0 { &fit_odd } else { &fit_even }, &s.x);
     let bw = Weights::default();
     let base = |s: &Sample| s.x.iter().zip(bw.w).map(|(x, w)| x * w).sum::<f64>();
@@ -348,12 +454,20 @@ fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], m
         }
         println!();
         for (cat, (label, _)) in categories.iter().enumerate() {
-            let sel: Vec<&Sample> = refs.iter().copied().filter(|s| s.cat == cat && s.fam == fam_idx).collect();
+            let sel: Vec<&Sample> = refs
+                .iter()
+                .copied()
+                .filter(|s| s.cat == cat && s.fam == fam_idx)
+                .collect();
             let col = |f: &dyn Fn(&Sample) -> f64| {
                 let v: Vec<(f64, bool)> = sel.iter().map(|s| (f(s), s.y)).collect();
                 tpr_at_fpr(&v, 0.01)
             };
-            print!("{label:<30}{:>8.0}%{:>8.0}%", 100.0 * col(&base), 100.0 * col(&cv));
+            print!(
+                "{label:<30}{:>8.0}%{:>8.0}%",
+                100.0 * col(&base),
+                100.0 * col(&cv)
+            );
             for k in 0..N_FEATURES {
                 print!("{:>10.0}%", 100.0 * col(&|s: &Sample| s.x[k]));
             }
@@ -370,7 +484,11 @@ fn pair_report(combos: &Combos, categories: &[(&str, fn(&str, &str) -> bool)], m
     let mut neg: Vec<f64> = pooled.iter().filter(|p| !p.1).map(|p| p.0).collect();
     neg.sort_by(|a, b| a.total_cmp(b));
     for q in [0.99, 0.995, 0.999] {
-        println!("  score threshold at {:.1}% pooled FPR: {:.3}", 100.0 * (1.0 - q), neg[(q * neg.len() as f64) as usize - 1]);
+        println!(
+            "  score threshold at {:.1}% pooled FPR: {:.3}",
+            100.0 * (1.0 - q),
+            neg[(q * neg.len() as f64) as usize - 1]
+        );
     }
 }
 
@@ -397,16 +515,26 @@ fn mutation_report(
 
     let mut files = Vec::new();
     for dir in ["impls", "impls-loose", "impls-hard"] {
-        for e in walkdir::WalkDir::new(dataset.join(dir)).into_iter().filter_map(Result::ok) {
+        for e in walkdir::WalkDir::new(dataset.join(dir))
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             if e.file_type().is_file() {
                 if let Some(lang) = Lang::from_path(e.path()) {
-                    files.push((lang, std::fs::read_to_string(e.path())?, e.path().display().to_string()));
+                    files.push((
+                        lang,
+                        std::fs::read_to_string(e.path())?,
+                        e.path().display().to_string(),
+                    ));
                 }
             }
         }
     }
     println!("\n== mutation robustness: original vs mutated copy (threshold {thr:.2} = 1% FPR on different-task pairs) ==");
-    println!("{:<18}{:>6}{:>10}{:>9}{:>9}{:>10}{:>10}{:>7}{:>12}", "mutation", "n", "recall", "@0.5", "@0.7", "combined", "structure", "name", "stmt_exact");
+    println!(
+        "{:<18}{:>6}{:>10}{:>9}{:>9}{:>10}{:>10}{:>7}{:>12}",
+        "mutation", "n", "recall", "@0.5", "@0.7", "combined", "structure", "name", "stmt_exact"
+    );
     for m in Mutation::ALL {
         let (mut n, mut hit, mut h5, mut h7) = (0usize, 0usize, 0usize, 0usize);
         let mut sums = [0.0f64; 4];
@@ -434,7 +562,15 @@ fn mutation_report(
         let d = n.max(1) as f64;
         println!(
             "{:<18}{:>6}{:>9.0}%{:>8.0}%{:>8.0}%{:>10.2}{:>10.2}{:>7.2}{:>12.2}",
-            m.name(), n, 100.0 * hit as f64 / d, 100.0 * h5 as f64 / d, 100.0 * h7 as f64 / d, sums[0] / d, sums[1] / d, sums[2] / d, sums[3] / d
+            m.name(),
+            n,
+            100.0 * hit as f64 / d,
+            100.0 * h5 as f64 / d,
+            100.0 * h7 as f64 / d,
+            sums[0] / d,
+            sums[1] / d,
+            sums[2] / d,
+            sums[3] / d
         );
     }
     Ok(())
@@ -458,9 +594,15 @@ pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
     let cases: Vec<Case> = serde_json::from_str(&std::fs::read_to_string(cases_path)?)?;
     let mut corpora: BTreeMap<String, Corpus> = BTreeMap::new();
     for c in &cases {
-        corpora.entry(c.repo_root.clone()).or_insert_with(|| Corpus::new(load_units(Path::new(&c.repo_root))));
+        corpora
+            .entry(c.repo_root.clone())
+            .or_insert_with(|| Corpus::new(load_units(Path::new(&c.repo_root))));
     }
-    let mut models: Vec<_> = std::fs::read_dir(impls)?.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let mut models: Vec<_> = std::fs::read_dir(impls)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     models.sort();
 
     struct Row {
@@ -478,30 +620,60 @@ pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
     for mdir in &models {
         let model = mdir.file_name().unwrap().to_string_lossy().to_string();
         for c in &cases {
-            let Some(path) = ["py", "ts", "tsx"].iter().map(|e| mdir.join(format!("{}.{e}", c.id))).find(|p| p.exists()) else {
+            let Some(path) = ["py", "ts", "tsx"]
+                .iter()
+                .map(|e| mdir.join(format!("{}.{e}", c.id)))
+                .find(|p| p.exists())
+            else {
                 missing += 1;
                 continue;
             };
-            let Some(lang) = Lang::from_path(&path) else { continue };
+            let Some(lang) = Lang::from_path(&path) else {
+                continue;
+            };
             let src = std::fs::read_to_string(&path)?;
             let mut units = extract_units("new", lang, &src);
             units.sort_by_key(|u| std::cmp::Reverse(u.token_count()));
             let Some(q) = units.first() else { continue };
             let corpus = &corpora[&c.repo_root];
-            let is_orig = |u: &Unit| u.file == c.file && u.start_line <= c.end_line && c.start_line <= u.end_line;
+            let is_orig = |u: &Unit| {
+                u.file == c.file && u.start_line <= c.end_line && c.start_line <= u.end_line
+            };
             let mut per_setting = Vec::new();
             for (_, w, min_name) in &settings {
-                let opts = MatchOptions { threshold: 0.0, min_tokens: 20, top_n: 8, min_lines: 0, min_name: *min_name, weights: *w, skip_tests: false, skip_boilerplate: false };
+                let opts = MatchOptions {
+                    threshold: 0.0,
+                    min_tokens: 20,
+                    top_n: 8,
+                    min_lines: 0,
+                    min_name: *min_name,
+                    weights: *w,
+                    skip_tests: false,
+                    skip_boilerplate: false,
+                };
                 let hits = corpus.best_for(q, opts);
-                let orig = hits.iter().find(|(u, _)| is_orig(u)).map(|(_, s)| s.combined);
-                let other = hits.iter().find(|(u, _)| !is_orig(u)).map(|(_, s)| s.combined).unwrap_or(0.0);
+                let orig = hits
+                    .iter()
+                    .find(|(u, _)| is_orig(u))
+                    .map(|(_, s)| s.combined);
+                let other = hits
+                    .iter()
+                    .find(|(u, _)| !is_orig(u))
+                    .map(|(_, s)| s.combined)
+                    .unwrap_or(0.0);
                 per_setting.push((orig, other));
             }
             let _ = score_with;
-            rows.push(Row { model: model.clone(), per_setting });
+            rows.push(Row {
+                model: model.clone(),
+                per_setting,
+            });
         }
     }
-    println!("{} (case, model) re-implementations evaluated ({missing} missing)", rows.len());
+    println!(
+        "{} (case, model) re-implementations evaluated ({missing} missing)",
+        rows.len()
+    );
     for (k, (label, _, _)) in settings.iter().enumerate() {
         println!("\n== {label} ==");
         let ths = [0.3, 0.4, 0.5, 0.6, 0.7];
@@ -516,17 +688,30 @@ pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
         println!();
         let mut names: Vec<&str> = rows.iter().map(|r| r.model.as_str()).collect();
         names.dedup();
-        let mut groups: Vec<(&str, Vec<&Row>)> = names.iter().map(|m| (*m, rows.iter().filter(|r| r.model == *m).collect())).collect();
+        let mut groups: Vec<(&str, Vec<&Row>)> = names
+            .iter()
+            .map(|m| (*m, rows.iter().filter(|r| r.model == *m).collect()))
+            .collect();
         groups.push(("all", rows.iter().collect()));
         for (m, rs) in groups {
             let n = rs.len().max(1) as f64;
             print!("{m:<10}{:>5}  {:<30}", rs.len(), "");
             for t in ths {
-                print!("{:>5.0}%", 100.0 * rs.iter().filter(|r| r.per_setting[k].0.is_some_and(|s| s >= t)).count() as f64 / n);
+                print!(
+                    "{:>5.0}%",
+                    100.0
+                        * rs.iter()
+                            .filter(|r| r.per_setting[k].0.is_some_and(|s| s >= t))
+                            .count() as f64
+                        / n
+                );
             }
             print!("   | {:<30}", "");
             for t in ths {
-                print!("{:>5.0}%", 100.0 * rs.iter().filter(|r| r.per_setting[k].1 >= t).count() as f64 / n);
+                print!(
+                    "{:>5.0}%",
+                    100.0 * rs.iter().filter(|r| r.per_setting[k].1 >= t).count() as f64 / n
+                );
             }
             println!();
         }

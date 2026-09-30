@@ -49,9 +49,16 @@ impl Scores {
 }
 
 pub const N_FEATURES: usize = 10;
-pub const FEATURE_NAMES: [&str; N_FEATURES] =
-    [
-    "structural", "loose", "kinds", "literals", "api", "name", "callees", "stmt_exact", "stmt_shape",
+pub const FEATURE_NAMES: [&str; N_FEATURES] = [
+    "structural",
+    "loose",
+    "kinds",
+    "literals",
+    "api",
+    "name",
+    "callees",
+    "stmt_exact",
+    "stmt_shape",
     "stmt_lcs",
 ];
 
@@ -67,7 +74,11 @@ pub struct Weights {
 impl Default for Weights {
     /// Re-implementation profile: mostly structure, so renamed rewrites still match.
     fn default() -> Self {
-        Weights { bias: 0.0, w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0], name_floor: 0.5 }
+        Weights {
+            bias: 0.0,
+            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
+            name_floor: 0.5,
+        }
     }
 }
 
@@ -77,7 +88,11 @@ impl Weights {
     /// identical statements and shared literals separate real copies from convention-driven
     /// look-alikes (CRUD endpoints, thin wrappers) far better than raw token overlap.
     pub fn copies() -> Self {
-        Weights { bias: 0.0, w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0], name_floor: 0.5 }
+        Weights {
+            bias: 0.0,
+            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
+            name_floor: 0.5,
+        }
     }
 }
 
@@ -91,7 +106,11 @@ fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
     let lexical = jaccard(&a.name_parts, &b.name_parts);
     match (&a.name_vec, &b.name_vec) {
         (Some(x), Some(y)) if x.len() == y.len() => {
-            let cos: f64 = x.iter().zip(y.iter()).map(|(p, q)| (*p as f64) * (*q as f64)).sum();
+            let cos: f64 = x
+                .iter()
+                .zip(y.iter())
+                .map(|(p, q)| (*p as f64) * (*q as f64))
+                .sum();
             lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0))
         }
         _ => lexical,
@@ -113,8 +132,12 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
         stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
         combined: 0.0,
     };
-    s.combined =
-        weights.bias + s.features().iter().zip(weights.w).map(|(f, w)| f * w).sum::<f64>();
+    s.combined = weights.bias
+        + s.features()
+            .iter()
+            .zip(weights.w)
+            .map(|(f, w)| f * w)
+            .sum::<f64>();
     s
 }
 
@@ -170,7 +193,16 @@ pub struct MatchOptions {
 
 impl Default for MatchOptions {
     fn default() -> Self {
-        MatchOptions { threshold: 0.5, min_tokens: 8, top_n: 3, min_lines: 6, min_name: 0.3, weights: Weights::default(), skip_tests: false, skip_boilerplate: true }
+        MatchOptions {
+            threshold: 0.5,
+            min_tokens: 8,
+            top_n: 3,
+            min_lines: 6,
+            min_name: 0.3,
+            weights: Weights::default(),
+            skip_tests: false,
+            skip_boilerplate: true,
+        }
     }
 }
 
@@ -199,17 +231,30 @@ impl Corpus {
         let mut name_postings: std::collections::HashMap<String, Vec<u32>> = Default::default();
         for (i, u) in units.iter().enumerate() {
             for part in &u.name_parts {
-                name_postings.entry(part.clone()).or_default().push(i as u32);
+                name_postings
+                    .entry(part.clone())
+                    .or_default()
+                    .push(i as u32);
             }
         }
-        let mut by_name: std::collections::HashMap<&str, (std::sync::Arc<[f32]>, Vec<u32>)> = Default::default();
+        let mut by_name: std::collections::HashMap<&str, (std::sync::Arc<[f32]>, Vec<u32>)> =
+            Default::default();
         for (i, u) in units.iter().enumerate() {
             if let Some(v) = &u.name_vec {
-                by_name.entry(u.name.as_str()).or_insert_with(|| (v.clone(), vec![])).1.push(i as u32);
+                by_name
+                    .entry(u.name.as_str())
+                    .or_insert_with(|| (v.clone(), vec![]))
+                    .1
+                    .push(i as u32);
             }
         }
         let sem_names = by_name.into_values().collect();
-        Corpus { units, postings, name_postings, sem_names }
+        Corpus {
+            units,
+            postings,
+            name_postings,
+            sem_names,
+        }
     }
 
     pub fn units(&self) -> &[Unit] {
@@ -236,7 +281,14 @@ impl Corpus {
                 // semantically close names that share no subword
                 let cutoff = opts.weights.name_floor + 0.1;
                 for (v, ids) in &self.sem_names {
-                    if v.len() == qv.len() && qv.iter().zip(v.iter()).map(|(a, b)| (*a as f64) * (*b as f64)).sum::<f64>() >= cutoff {
+                    if v.len() == qv.len()
+                        && qv
+                            .iter()
+                            .zip(v.iter())
+                            .map(|(a, b)| (*a as f64) * (*b as f64))
+                            .sum::<f64>()
+                            >= cutoff
+                    {
                         for &i in ids {
                             if !seen[i as usize] {
                                 seen[i as usize] = true;
@@ -250,7 +302,11 @@ impl Corpus {
         }
         let (threshold, w) = (opts.threshold, &opts.weights);
         let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
-        let min_jaccard = if w.w[0] > 0.0 { ((threshold - rest) / w.w[0]).max(0.0) } else { 0.0 };
+        let min_jaccard = if w.w[0] > 0.0 {
+            ((threshold - rest) / w.w[0]).max(0.0)
+        } else {
+            0.0
+        };
         let min_shared = ((min_jaccard * q.fingerprint.len() as f64).ceil() as u32).max(1);
         let mut counts: std::collections::HashMap<u32, u32> = Default::default();
         for h in &q.fingerprint {
@@ -258,7 +314,11 @@ impl Corpus {
                 *counts.entry(i).or_insert(0) += 1;
             }
         }
-        counts.into_iter().filter(|(_, c)| *c >= min_shared).map(|(i, _)| i).collect()
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c >= min_shared)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Best-scoring units for `q`, highest `combined` first, restricted to the same language
@@ -305,11 +365,14 @@ pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Ve
                 && !(opts.skip_tests && q.is_test)
         })
         .flat_map(|q| {
-            corpus.best_for(q, opts).into_iter().map(|(c, scores)| Match {
-                query: q.into(),
-                candidate: c.into(),
-                scores,
-            })
+            corpus
+                .best_for(q, opts)
+                .into_iter()
+                .map(|(c, scores)| Match {
+                    query: q.into(),
+                    candidate: c.into(),
+                    scores,
+                })
         })
         .collect()
 }
@@ -317,7 +380,10 @@ pub fn find_matches(queries: &[Unit], corpus: &Corpus, opts: MatchOptions) -> Ve
 /// Extract units from a single file (language from the extension); empty if unsupported/unreadable.
 fn is_generated(path: &std::path::Path) -> bool {
     let p = path.to_string_lossy();
-    p.contains(".gen.") || p.contains("/generated/") || p.contains("/__generated__/") || p.ends_with(".d.ts")
+    p.contains(".gen.")
+        || p.contains("/generated/")
+        || p.contains("/__generated__/")
+        || p.ends_with(".d.ts")
 }
 
 pub fn units_from_file(root: &std::path::Path, path: &std::path::Path) -> Vec<Unit> {
@@ -330,19 +396,37 @@ pub fn units_from_file(root: &std::path::Path, path: &std::path::Path) -> Vec<Un
     let Ok(source) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
     crate::units::extract_units(&rel, lang, &source)
 }
 
-const SKIP_DIRS: &[&str] =
-    &["node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".codegraph", ".claude", ".worktrees"];
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".codegraph",
+    ".claude",
+    ".worktrees",
+];
 
 /// Supported source files below `root`, honouring `.gitignore`/`.ignore`, skipping hidden and
 /// vendored directories, and any `excludes` globs (gitignore syntax, e.g. `**/generated/**`).
 pub fn walk_files(root: &std::path::Path, excludes: &[String]) -> Vec<std::path::PathBuf> {
     let mut b = ignore::WalkBuilder::new(root);
     b.require_git(false).filter_entry(|e| {
-        e.depth() == 0 || !e.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
+        e.depth() == 0
+            || !e
+                .file_name()
+                .to_str()
+                .is_some_and(|n| SKIP_DIRS.contains(&n))
     });
     if !excludes.is_empty() {
         let mut ob = ignore::overrides::OverrideBuilder::new(root);
@@ -367,7 +451,10 @@ pub fn load_units(root: &std::path::Path) -> Vec<Unit> {
 }
 
 pub fn load_units_with(root: &std::path::Path, excludes: &[String]) -> Vec<Unit> {
-    walk_files(root, excludes).iter().flat_map(|p| units_from_file(root, p)).collect()
+    walk_files(root, excludes)
+        .iter()
+        .flat_map(|p| units_from_file(root, p))
+        .collect()
 }
 
 #[cfg(test)]
@@ -383,12 +470,22 @@ mod tests {
     fn finds_renamed_copy_and_ignores_unrelated() {
         let a = "def total(items):\n    result = 0\n    for item in items:\n        if item > 0:\n            result += item\n    return result\n";
         let b = "def summe(values):\n    acc = 0\n    for v in values:\n        if v > 0:\n            acc += v\n    return acc\n";
-        let c = "def other(path):\n    with open(path) as fh:\n        return fh.read().splitlines()\n";
+        let c =
+            "def other(path):\n    with open(path) as fh:\n        return fh.read().splitlines()\n";
         let mut corpus = units("a.py", a);
         corpus.extend(units("c.py", c));
         let corpus = Corpus::new(corpus);
         let q = units("b.py", b);
-        let m = find_matches(&q, &corpus, MatchOptions { min_tokens: 5, min_lines: 0, min_name: 0.0, ..Default::default() });
+        let m = find_matches(
+            &q,
+            &corpus,
+            MatchOptions {
+                min_tokens: 5,
+                min_lines: 0,
+                min_name: 0.0,
+                ..Default::default()
+            },
+        );
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].candidate.name, "total");
         assert!(m[0].scores.structural > 0.99);
@@ -401,9 +498,22 @@ mod tests {
             "def g(x):\n    y = x + 1\n    z = y * 2 + x\n    w = z - y + x * 3\n    return w * 3\n",
             "def h(p):\n    out = [i for i in p if i]\n    total = sum(out) + len(out)\n    return total\n",
         ];
-        let all: Vec<Unit> = srcs.iter().enumerate().flat_map(|(i, s)| units(&format!("{i}.py"), s)).collect();
+        let all: Vec<Unit> = srcs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| units(&format!("{i}.py"), s))
+            .collect();
         let corpus = Corpus::new(all.clone());
-        let opts = MatchOptions { threshold: 0.45, min_tokens: 3, top_n: 10, min_lines: 0, min_name: 0.0, weights: Weights::default(), skip_tests: false, skip_boilerplate: false };
+        let opts = MatchOptions {
+            threshold: 0.45,
+            min_tokens: 3,
+            top_n: 10,
+            min_lines: 0,
+            min_name: 0.0,
+            weights: Weights::default(),
+            skip_tests: false,
+            skip_boilerplate: false,
+        };
         for q in &all {
             let brute = all
                 .iter()
@@ -421,7 +531,11 @@ pub fn load_file_units(root: &std::path::Path) -> Vec<Unit> {
         .filter_map(|p| {
             let lang = crate::lang::Lang::from_path(p)?;
             let source = std::fs::read_to_string(p).ok()?;
-            let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
             crate::units::extract_file_unit(&rel, lang, &source)
         })
         .collect()

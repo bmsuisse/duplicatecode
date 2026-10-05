@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "duplicatecode"
 dynamic = ["version"]
-description = "Static (LLM-free) detection of duplicate/similar code in Python and TypeScript"
+description = "Static (LLM-free) detection of duplicate/similar code in Python, TypeScript and C#"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"

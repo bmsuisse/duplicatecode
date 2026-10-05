@@ -6,6 +6,8 @@ pub enum Lang {
     Python,
     TypeScript,
     Tsx,
+    #[serde(rename = "csharp")]
+    CSharp,
 }
 
 impl Lang {
@@ -14,6 +16,7 @@ impl Lang {
             "py" => Some(Lang::Python),
             "ts" | "mts" | "cts" => Some(Lang::TypeScript),
             "tsx" => Some(Lang::Tsx),
+            "cs" => Some(Lang::CSharp),
             _ => None,
         }
     }
@@ -23,14 +26,16 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         }
     }
 
-    /// Python vs. the TypeScript family; units are only compared within a family.
+    /// Python, C# or the TypeScript family; units are only compared within a family.
     pub fn family(self) -> &'static str {
         match self {
             Lang::Python => "python",
             Lang::TypeScript | Lang::Tsx => "typescript",
+            Lang::CSharp => "csharp",
         }
     }
 }

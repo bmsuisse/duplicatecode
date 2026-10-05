@@ -3,13 +3,14 @@ name = "duplicatecode-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Static duplicate/similar code detection engine for Python and TypeScript"
+description = "Static duplicate/similar code detection engine for Python, TypeScript and C#"
 
 [dependencies]
 ignore = "0.4.33"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tree-sitter = "0.27.0"
+tree-sitter-c-sharp = "0.23.5"
 tree-sitter-python = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 ureq = { version = "2", features = ["json"] }

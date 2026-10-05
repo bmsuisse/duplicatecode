@@ -406,6 +406,9 @@ pub fn units_from_file(root: &std::path::Path, path: &std::path::Path) -> Vec<Un
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
+    "bin",
+    "obj",
+    ".vs",
     "target",
     ".venv",
     "venv",

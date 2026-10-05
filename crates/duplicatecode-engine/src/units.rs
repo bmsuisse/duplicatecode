@@ -124,6 +124,12 @@ impl Ctx<'_> {
     }
 
     fn walk(&mut self, node: Node) {
+        // bodyless signatures (interfaces) and enums are not code units
+        if self.lang == Lang::CSharp
+            && matches!(node.kind(), "interface_declaration" | "enum_declaration")
+        {
+            return;
+        }
         if let Some((kind, name, unit_node)) = self.classify(node) {
             self.emit(kind, name, unit_node);
             // Only classes are searched for member units; nested functions belong to their parent.
@@ -294,6 +300,13 @@ impl Ctx<'_> {
                 "field_declaration" | "property_declaration" if self.lang == Lang::CSharp => {
                     if m.children(&mut m.walk())
                         .any(|c| c.kind() == "arrow_expression_clause")
+                        || m.children(&mut m.walk()).any(|c| {
+                            c.kind() == "accessor_list"
+                                && c.children(&mut c.walk()).any(|a| {
+                                    a.kind() == "accessor_declaration"
+                                        && a.child_by_field_name("body").is_some()
+                                })
+                        })
                     {
                         return false;
                     }
@@ -350,10 +363,14 @@ impl Ctx<'_> {
                         _ => self.text(o),
                     })
                     .unwrap_or_default();
+                let method = f
+                    .child_by_field_name("name")
+                    .map(|x| self.text(x))
+                    .unwrap_or_default();
                 matches!(
                     obj.to_lowercase().as_str(),
                     "console" | "debug" | "trace" | "logger" | "_logger" | "log" | "_log"
-                )
+                ) && (method.starts_with("Write") || method.starts_with("Log"))
             }
             "expression_statement" => {
                 let Some(e) = node.named_child(0) else {
@@ -909,9 +926,12 @@ fn is_test_path(file: &str) -> bool {
     let f = file.replace('\\', "/");
     let base = f.rsplit('/').next().unwrap_or(&f);
     f.split('/').any(|c| {
-        matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec") || c.ends_with(".Tests")
+        matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec")
+            || c.ends_with(".Tests")
+            || c.ends_with(".Test")
     }) || base.ends_with("Tests.cs")
         || base.ends_with("Test.cs")
+        || base.ends_with("Spec.cs")
         || base.starts_with("test_")
         || base == "conftest.py"
         || base.ends_with("_test.py")
@@ -965,6 +985,14 @@ mod tests {
             .map(|u| (u.kind.as_str(), u.name.as_str()))
             .collect();
         assert_eq!(names, [("function", "f"), ("class", "K"), ("method", "m")]);
+    }
+
+    #[test]
+    fn csharp_skips_interfaces_and_keeps_logic_properties() {
+        let src = "interface I { int Foo(int x); }\nenum E { A, B }\nclass P { public int X { get { return Compute(); } } }\nclass Q { public int X { get; set; } }\n";
+        let u = extract_units("p.cs", Lang::CSharp, src);
+        let n: Vec<_> = u.iter().map(|x| (x.name.as_str(), x.boilerplate)).collect();
+        assert_eq!(n, [("P", false), ("Q", true)]);
     }
 
     #[test]

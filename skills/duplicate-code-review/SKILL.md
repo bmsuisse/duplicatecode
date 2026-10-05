@@ -1,6 +1,6 @@
 ---
 name: duplicate-code-review
-description: Find duplicated or near-duplicated code (Python, TypeScript/TSX) in a repo or monorepo folder, or check whether new code re-implements something that already exists, using the `duplicatecode` CLI. Use when asked to find/report duplicates, dead-weight copy-paste, "did we already write this", or to review a diff/PR for duplication. Cheap and fast; ranks candidates so you only read the promising ones.
+description: Find duplicated or near-duplicated code (Python, TypeScript/TSX, C#) in a repo or monorepo folder, or check whether new code re-implements something that already exists, using the `duplicatecode` CLI. Use when asked to find/report duplicates, dead-weight copy-paste, "did we already write this", or to review a diff/PR for duplication. Cheap and fast; ranks candidates so you only read the promising ones.
 ---
 
 # Duplicate code review with `duplicatecode`

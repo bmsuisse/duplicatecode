@@ -170,6 +170,16 @@ impl Ctx<'_> {
                 Some(("class", field_name(node)?, node))
             }
             (_, "method_definition") => Some(("function", field_name(node)?, node)),
+            (
+                Lang::CSharp,
+                "struct_declaration" | "record_declaration" | "record_struct_declaration",
+            ) => Some(("class", field_name(node)?, node)),
+            (Lang::CSharp, "method_declaration" | "local_function_statement") => {
+                Some(("function", field_name(node)?, node))
+            }
+            (Lang::CSharp, "constructor_declaration") => {
+                Some(("function", "constructor".into(), node))
+            }
             // const foo = () => ... / const foo = function () {...}; also class fields
             (Lang::TypeScript | Lang::Tsx, "variable_declarator" | "public_field_definition") => {
                 let value = node.child_by_field_name("value")?;
@@ -281,6 +291,14 @@ impl Ctx<'_> {
                     }
                     _ => return false,
                 },
+                "field_declaration" | "property_declaration" if self.lang == Lang::CSharp => {
+                    if m.children(&mut m.walk())
+                        .any(|c| c.kind() == "arrow_expression_clause")
+                    {
+                        return false;
+                    }
+                    fields += 1;
+                }
                 "public_field_definition" | "property_signature" => {
                     if m.child_by_field_name("value").is_some_and(|v| {
                         matches!(
@@ -312,6 +330,31 @@ impl Ctx<'_> {
     fn is_debug(&self, node: Node) -> bool {
         match node.kind() {
             "debugger_statement" => true,
+            "expression_statement" if self.lang == Lang::CSharp => {
+                // Console.WriteLine(..), Debug.WriteLine(..), _logger.LogInformation(..)
+                let Some(f) = node
+                    .named_child(0)
+                    .filter(|e| e.kind() == "invocation_expression")
+                    .and_then(|e| e.child_by_field_name("function"))
+                    .filter(|f| f.kind() == "member_access_expression")
+                else {
+                    return false;
+                };
+                let obj = f
+                    .child_by_field_name("expression")
+                    .map(|o| match o.kind() {
+                        "member_access_expression" => o
+                            .child_by_field_name("name")
+                            .map(|x| self.text(x))
+                            .unwrap_or_default(),
+                        _ => self.text(o),
+                    })
+                    .unwrap_or_default();
+                matches!(
+                    obj.to_lowercase().as_str(),
+                    "console" | "debug" | "trace" | "logger" | "_logger" | "log" | "_log"
+                )
+            }
             "expression_statement" => {
                 let Some(e) = node.named_child(0) else {
                     return false;
@@ -354,7 +397,8 @@ impl Ctx<'_> {
 
     /// `x = expr` immediately followed by `return x`  ==>  the value expression of `return expr`.
     fn temp_return<'t>(&self, a: Node<'t>, b: Node<'t>) -> Option<Node<'t>> {
-        if b.kind() != "return_statement" || b.named_child_count() != 1 {
+        if self.lang == Lang::CSharp || b.kind() != "return_statement" || b.named_child_count() != 1
+        {
             return None;
         }
         let (name, value) = if self.lang == Lang::Python {
@@ -401,16 +445,23 @@ impl Ctx<'_> {
             return;
         }
         match kind {
-            "string" | "template_string" | "string_literal" | "concatenated_string" => {
-                out.push("STR".into())
+            "string"
+            | "template_string"
+            | "string_literal"
+            | "concatenated_string"
+            | "verbatim_string_literal"
+            | "raw_string_literal"
+            | "interpolated_string_expression" => out.push("STR".into()),
+            "integer" | "float" | "number" | "integer_literal" | "real_literal" => {
+                out.push("NUM".into())
             }
-            "integer" | "float" | "number" => out.push("NUM".into()),
             "identifier"
             | "property_identifier"
             | "shorthand_property_identifier"
             | "shorthand_property_identifier_pattern"
             | "type_identifier"
             | "private_property_identifier" => out.push("ID".into()),
+            "generic_name" if self.lang == Lang::CSharp => out.push("ID".into()),
             "list_comprehension"
             | "set_comprehension"
             | "dictionary_comprehension"
@@ -447,7 +498,7 @@ impl Ctx<'_> {
                     _ => self.norm_children(node, out, skip_blocks),
                 }
             }
-            "block" | "statement_block" | "module" | "program" => {
+            "block" | "statement_block" | "module" | "program" | "compilation_unit" => {
                 let n = node.child_count();
                 let mut i = 0;
                 while i < n {
@@ -543,7 +594,7 @@ impl Ctx<'_> {
     fn statements(&self, node: Node, out: &mut Vec<Stmt>) {
         let blockish = matches!(
             node.kind(),
-            "block" | "statement_block" | "module" | "program"
+            "block" | "statement_block" | "module" | "program" | "compilation_unit"
         );
         let n = node.child_count();
         let mut i = 0;
@@ -698,7 +749,7 @@ impl Ctx<'_> {
             return;
         }
         match kind {
-            "call" | "call_expression" => {
+            "call" | "call_expression" | "invocation_expression" => {
                 if let Some(func) = node.child_by_field_name("function") {
                     if let Some(n) = callee_name(func, self.src) {
                         let n = n.to_lowercase();
@@ -707,17 +758,22 @@ impl Ctx<'_> {
                     }
                 }
             }
-            "attribute" | "member_expression" => {
-                let field = if kind == "attribute" {
-                    "attribute"
-                } else {
-                    "property"
+            "attribute" | "member_expression" | "member_access_expression" => {
+                let field = match kind {
+                    "attribute" => "attribute",
+                    "member_access_expression" => "name",
+                    _ => "property",
                 };
                 if let Some(a) = node.child_by_field_name(field) {
                     f.api.insert(self.text(a).to_lowercase());
                 }
             }
-            "string" | "template_string" | "string_literal" | "concatenated_string" => {
+            "string"
+            | "template_string"
+            | "string_literal"
+            | "concatenated_string"
+            | "verbatim_string_literal"
+            | "raw_string_literal" => {
                 let t = self.text(node);
                 let t = t.trim_matches(|c| c == '"' || c == '\'' || c == '`');
                 if !t.is_empty() && t.len() <= 24 && !t.contains('{') {
@@ -725,7 +781,7 @@ impl Ctx<'_> {
                 }
                 return;
             }
-            "integer" | "float" | "number" => {
+            "integer" | "float" | "number" | "integer_literal" | "real_literal" => {
                 let t = self.text(node);
                 if !matches!(t.as_str(), "0" | "1" | "2" | "-1") {
                     f.literals.insert(t);
@@ -764,6 +820,13 @@ const TYPE_KINDS: &[&str] = &[
     "type_arguments",
     "type_predicate_annotation",
     "asserts_annotation",
+    // C# type-level syntax
+    "type_argument_list",
+    "type_parameter_list",
+    "type_parameter_constraints_clause",
+    "nullable_type",
+    "modifier",
+    "predefined_type",
     // Python annotations
     "type",
     "type_parameter",
@@ -845,8 +908,10 @@ fn is_module_level(declarator: Node) -> bool {
 fn is_test_path(file: &str) -> bool {
     let f = file.replace('\\', "/");
     let base = f.rsplit('/').next().unwrap_or(&f);
-    f.split('/')
-        .any(|c| matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec"))
+    f.split('/').any(|c| {
+        matches!(c, "tests" | "test" | "__tests__" | "e2e" | "spec") || c.ends_with(".Tests")
+    }) || base.ends_with("Tests.cs")
+        || base.ends_with("Test.cs")
         || base.starts_with("test_")
         || base == "conftest.py"
         || base.ends_with("_test.py")
@@ -866,6 +931,7 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
     match f.kind() {
         "identifier" | "property_identifier" => text(f),
         "attribute" => f.child_by_field_name("attribute").and_then(text),
+        "member_access_expression" => f.child_by_field_name("name").and_then(text),
         "member_expression" => f.child_by_field_name("property").and_then(text),
         _ => None,
     }
@@ -899,6 +965,31 @@ mod tests {
             .map(|u| (u.kind.as_str(), u.name.as_str()))
             .collect();
         assert_eq!(names, [("function", "f"), ("class", "K"), ("method", "m")]);
+    }
+
+    #[test]
+    fn csharp_classes_methods_and_normalization() {
+        let src = "namespace N {\n  public class Calc {\n    public int Add(int a, int b) {\n      Console.WriteLine(\"x\");\n      return Helper(a) + b;\n    }\n    public Calc() { }\n  }\n  public record Dto(int Id);\n}\n";
+        let u = extract_units("Calc.cs", Lang::CSharp, src);
+        let names: Vec<_> = u
+            .iter()
+            .map(|x| (x.kind.as_str(), x.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("class", "Calc"),
+                ("method", "Add"),
+                ("method", "constructor"),
+                ("class", "Dto")
+            ]
+        );
+        let add = &u[1];
+        assert!(add.callees.contains("helper") && !add.callees.contains("writeline"));
+        let renamed = "class Other {\n int Plus(int x, int y) {\n return Foo(x) + y;\n }\n}\n";
+        let b = extract_units("o.cs", Lang::CSharp, renamed);
+        assert_eq!(add.tokens, b[1].tokens);
+        assert!(u[2].boilerplate);
     }
 
     fn toks(src: &str) -> Vec<String> {

@@ -80,7 +80,7 @@ impl Profile {
 #[derive(Parser)]
 #[command(
     version,
-    about = "Detect duplicate/similar code in Python and TypeScript"
+    about = "Detect duplicate/similar code in Python, TypeScript and C#"
 )]
 struct Cli {
     #[command(subcommand)]

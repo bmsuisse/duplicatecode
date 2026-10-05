@@ -1,6 +1,6 @@
 # duplicatecode
 
-Static (LLM-free) detection of duplicate / similar code in Python and TypeScript (TSX),
+Static (LLM-free) detection of duplicate / similar code in Python, TypeScript (TSX) and C#,
 aimed at catching an LLM re-implementing something that already exists. Input can be a git diff
 checked against existing source.
 

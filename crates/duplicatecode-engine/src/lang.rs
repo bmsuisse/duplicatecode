@@ -14,8 +14,8 @@ impl Lang {
     pub fn from_path(path: &Path) -> Option<Lang> {
         match path.extension()?.to_str()? {
             "py" => Some(Lang::Python),
-            "ts" | "mts" | "cts" => Some(Lang::TypeScript),
-            "tsx" => Some(Lang::Tsx),
+            "ts" | "mts" | "cts" | "js" | "mjs" | "cjs" => Some(Lang::TypeScript),
+            "tsx" | "jsx" => Some(Lang::Tsx),
             "cs" => Some(Lang::CSharp),
             _ => None,
         }

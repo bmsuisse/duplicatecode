@@ -38,27 +38,34 @@ fn env_first(names: &[&str]) -> Option<String> {
 }
 
 impl EmbedConfig {
-    /// Reads `AZURE_AI_FOUNDRY_ENDPOINT` (or `AZURE_OPENAI_ENDPOINT`, `DUPLICATECODE_EMBED_ENDPOINT`),
-    /// `…_API_KEY`, `…_EMBEDDING_DEPLOYMENT` and `…_API_VERSION`. Without an API key an Entra ID token
-    /// from `az account get-access-token` is used.
+    /// Reads `AZURE_AI_FOUNDRY_ENDPOINT` (or `AZURE_OPENAI_ENDPOINT`, `DUPLICATECODE_EMBED_ENDPOINT`,
+    /// `OPENAI_BASE_URL`), `…_API_KEY` (incl. `OPENAI_API_KEY`), `…_EMBEDDING_DEPLOYMENT` /
+    /// `OPENAI_EMBEDDING_MODEL` and `…_API_VERSION`. With only `OPENAI_API_KEY` set, api.openai.com is
+    /// used. Without an API key on an Azure endpoint, an Entra ID token from `az` is used.
     pub fn from_env(dims: Option<u32>) -> Option<EmbedConfig> {
         let endpoint = env_first(&[
             "AZURE_AI_FOUNDRY_ENDPOINT",
             "AZURE_OPENAI_ENDPOINT",
             "DUPLICATECODE_EMBED_ENDPOINT",
-        ])?;
+            "OPENAI_BASE_URL",
+        ])
+        .or_else(|| {
+            env_first(&["OPENAI_API_KEY"]).map(|_| "https://api.openai.com/v1".to_string())
+        })?;
         Some(EmbedConfig::new(
             endpoint,
             env_first(&[
                 "AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT",
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
                 "DUPLICATECODE_EMBED_MODEL",
+                "OPENAI_EMBEDDING_MODEL",
             ])
             .unwrap_or_else(|| "text-embedding-3-small".into()),
             env_first(&[
                 "AZURE_AI_FOUNDRY_API_KEY",
                 "AZURE_OPENAI_API_KEY",
                 "DUPLICATECODE_EMBED_API_KEY",
+                "OPENAI_API_KEY",
             ]),
             env_first(&["AZURE_AI_FOUNDRY_API_VERSION", "AZURE_OPENAI_API_VERSION"]),
             dims,
@@ -133,7 +140,11 @@ impl EmbedConfig {
 
     fn auth(&self) -> Result<(String, String), String> {
         if let Some(k) = &self.api_key {
-            return Ok(("api-key".into(), k.clone()));
+            return Ok(match self.style {
+                // OpenAI and compatible servers expect a bearer token; Azure uses `api-key`.
+                Style::OpenAi => ("Authorization".into(), format!("Bearer {k}")),
+                _ => ("api-key".into(), k.clone()),
+            });
         }
         if let Some(t) = env_first(&["AZURE_AI_FOUNDRY_TOKEN"]) {
             return Ok(("Authorization".into(), format!("Bearer {t}")));
@@ -533,6 +544,19 @@ mod tests {
         );
         assert_eq!(f.body(&["a".into()])["model"], "text-embedding-3-small");
         assert_eq!(f.body(&["a".into()])["dimensions"], 256);
+    }
+
+    #[test]
+    fn api_key_header_depends_on_style() {
+        let mk = |e: &str| EmbedConfig::new(e.into(), "m".into(), Some("sk-1".into()), None, None);
+        assert_eq!(
+            mk("https://api.openai.com/v1").auth().unwrap(),
+            ("Authorization".into(), "Bearer sk-1".into())
+        );
+        assert_eq!(
+            mk("https://r.openai.azure.com").auth().unwrap(),
+            ("api-key".into(), "sk-1".into())
+        );
     }
 
     #[test]

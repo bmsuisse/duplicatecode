@@ -32,6 +32,24 @@ duplicatecode scan . --pairs --json                  # machine-readable pairs in
 duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives <other repo>]
 ```
 
+## Embeddings (bring your own key)
+
+`--embeddings` adds a semantic name-similarity signal. Credentials come from the environment:
+
+```sh
+# OpenAI
+export OPENAI_API_KEY=sk-...                      # optional: OPENAI_EMBEDDING_MODEL (default text-embedding-3-small)
+# OpenAI-compatible server (vLLM, Ollama, LiteLLM, ...)
+export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_EMBEDDING_MODEL=nomic-embed-text
+# Azure AI Foundry (key, or `az login` if no key is set)
+export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
+export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+# Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+
+duplicatecode embed-test fetchUser getUser     # check credentials
+duplicatecode scan . --embeddings
+```
+
 ## How it works
 
 Units (functions, methods, classes, arrow-function components) are extracted with tree-sitter and

@@ -1,4 +1,5 @@
 mod bench;
+mod groups;
 mod review;
 
 use anyhow::{Context, Result};
@@ -11,7 +12,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 /// Optional semantic name similarity (Azure AI Foundry / Azure OpenAI / OpenAI-compatible embeddings).
-/// Configure with AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
+/// Configure with OPENAI_API_KEY [+ OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL], or AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
 /// AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT. Vectors are cached in a flat file.
 #[derive(clap::Args, Clone)]
 struct EmbedArgs {
@@ -35,7 +36,7 @@ impl EmbedArgs {
             return Ok(());
         }
         let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
-            .context("--embeddings needs AZURE_AI_FOUNDRY_ENDPOINT (or AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT)")?;
+            .context("--embeddings needs OPENAI_API_KEY (optionally OPENAI_BASE_URL for compatible servers) or AZURE_AI_FOUNDRY_ENDPOINT / AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT")?;
         let path = self
             .embed_cache
             .clone()
@@ -210,6 +211,15 @@ enum Cmd {
         /// Directory with one sub-folder per model, each holding `<id>.py|.ts` files.
         #[arg(long)]
         impls: PathBuf,
+    },
+    /// Evaluate on labeled clone groups: `<root>/<dataset>/<group>/<file>`; files in one group are
+    /// clones of each other (e.g. accepted CodeNet submissions of one problem). See `eval/`.
+    EvalGroups {
+        #[arg(long, default_value = "eval/data/codenet")]
+        root: PathBuf,
+        /// Print only the final `score=` line.
+        #[arg(long)]
+        quiet: bool,
     },
     /// Evaluate the detector on the LLM-implementation benchmark dataset.
     Bench {
@@ -418,10 +428,11 @@ fn main() -> Result<()> {
             };
             print!("{}", review::run(units, &src, &o));
         }
+        Cmd::EvalGroups { root, quiet } => groups::run(&root, quiet)?,
         Cmd::EmbedTest { embed, names } => {
             let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
                 .context(
-                    "set AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)",
+                    "set OPENAI_API_KEY (+ OPENAI_BASE_URL), or AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)",
                 )?;
             let path = embed
                 .embed_cache

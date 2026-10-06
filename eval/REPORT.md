@@ -108,6 +108,42 @@ How much to trust it:
 - Cost: about 2.5 s per file on 24 CPU cores for a 0.6B model, i.e. roughly 40 minutes for 960 files; a
   GPU or a hosted endpoint is needed for real repositories. Vectors are cacheable per unit text.
 
+### Embedder bake-off (`eval/embed_bench.py`, `embed-anything`, CPU, clean data only)
+
+Each model embeds the fn-* units and SQL files of dev and holdout (1507 texts, mean 371 chars). "cosine"
+is the model alone, "blend" is `0.65 * static + 0.35 * cosine` (the shipped `--embed-weight`), scores are
+`(AUC + TPR@1%FPR) / 2`; static baseline is 0.70 / 0.70 / 0.80 / 0.71. Timings were taken with four
+benchmarks sharing 24 cores, so read them as relative.
+
+| model | dim | ms/text | cosine: fn-py dev/hold, fn-ts dev/hold | blend: same | mean blend gain |
+| --- | --- | --- | --- | --- | --- |
+| sentence-transformers/all-MiniLM-L6-v2 | 384 | 248 | 0.84 0.81 / 0.68 0.90 | 0.81 0.78 / 0.80 0.85 | **+0.083** |
+| Qwen/Qwen3-Embedding-0.6B | 1024 | 1168 | 0.83 0.80 / 0.72 0.90 | 0.80 0.77 / 0.82 0.85 | +0.081 |
+| BAAI/bge-small-en-v1.5 | 384 | 436 | 0.83 0.78 / 0.56 0.86 | 0.79 0.76 / 0.77 0.81 | +0.052 |
+| jinaai/jina-embeddings-v2-base-en | 768 | 471 | 0.74 0.79 / 0.52 0.79 | 0.73 0.74 / 0.77 0.76 | +0.018 |
+| minishlab/potion-base-8M (static) | 256 | ~1 | 0.75 0.68 / 0.47 0.74 | 0.76 0.74 / 0.70 0.77 | +0.013 |
+
+SQL is saturated (about 1.0 for every model), so it does not discriminate. Models that `embed-anything`
+cannot load in this build: `nomic-ai/modernbert-embed-base`, `Alibaba-NLP/gte-modernbert-base`
+("Model not supported"), `jinaai/jina-code-embeddings-0.5b`, `BAAI/bge-m3` (same), and
+`jinaai/jina-embeddings-v2-base-code` (missing tensor). The code-specific Jina models therefore could not
+be tested.
+
+Proposal:
+
+- **Default: `sentence-transformers/all-MiniLM-L6-v2`.** Statistically tied with Qwen3-0.6B on this data at
+  a quarter of the time per text, 22M parameters and 384-dim vectors (small cache). Caveat: it truncates at
+  256 word pieces, so it sees only the start of long units.
+- **Quality option: `Qwen/Qwen3-Embedding-0.6B`.** Same measured gain, 8k-token context, better on
+  TypeScript dev cosine (0.72 vs 0.68); use it where units are long and CPU time is not a concern.
+- **Instant, no-model-server option: `minishlab/potion-base-8M`.** About 1 ms per text and still positive
+  (+0.013), useful as a cheap always-on signal.
+- **Hosted:** OpenAI `text-embedding-3-small` and Cohere `embed-v4.0` are wired in but not measured (no
+  key); they should be added to the same bake-off before choosing a hosted default.
+
+The top two are within noise on 25 tasks; the ranking among them is not established. A larger,
+uncontaminated function-level set is the prerequisite for a firmer default.
+
 Recommendation: add unit-level embeddings as an **optional** signal behind a flag (blend about 0.3-0.5 for
 Python), keep the static path as the default, and re-measure on a larger uncontaminated function-level set
 before choosing a default lambda.

@@ -75,6 +75,7 @@ pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     };
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        keep_output: false,
         file,
         lang,
         src: source.as_bytes(),
@@ -102,6 +103,7 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        keep_output: true,
         file,
         lang,
         src: source.as_bytes(),
@@ -229,6 +231,8 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
 }
 
 struct Ctx<'a> {
+    /// Whole-file (script) mode: print/console output is the program's result, not debug noise.
+    keep_output: bool,
     file: &'a str,
     lang: Lang,
     src: &'a [u8],
@@ -454,7 +458,7 @@ impl Ctx<'_> {
         let kind = node.kind();
         TYPE_KINDS.contains(&kind)
             || (self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node))
-            || self.is_debug(node)
+            || (!self.keep_output && self.is_debug(node))
     }
 
     fn is_debug(&self, node: Node) -> bool {

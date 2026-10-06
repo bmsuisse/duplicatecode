@@ -177,3 +177,65 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
     println!("score={mean:.4}");
     Ok(())
 }
+
+/// Build `<out>/<id>/<variant>.tsx` groups from real components: the original plus mechanically
+/// rewritten variants (renames, statement swaps, temp variables, logging, dead code, all combined).
+/// Other components act as negatives. `skip` lets a holdout set use disjoint files.
+pub fn make_mutation_groups(
+    src: &Path,
+    out: &Path,
+    n: usize,
+    seed: u64,
+    skip: usize,
+) -> Result<()> {
+    use duplicatecode_engine::mutate::{apply, Mutation};
+    use duplicatecode_engine::{walk_files, Lang};
+    let mut files: Vec<_> = walk_files(src, &[])
+        .into_iter()
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            s.ends_with(".tsx")
+                && !s.contains("node_modules")
+                && !s.contains("/.worktrees/")
+                && !s.contains("/.claude/")
+                && !s.contains(".test.")
+                && !s.contains(".stories.")
+                && !s.contains("/generated/")
+        })
+        .filter(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| (30..=300).contains(&t.lines().count()) && t.contains("</"))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for i in (1..files.len()).rev() {
+        files.swap(i, (next() % (i as u64 + 1)) as usize);
+    }
+    let mut written = 0;
+    for (k, p) in files.iter().skip(skip).take(n).enumerate() {
+        let text = std::fs::read_to_string(p)?;
+        let dir = out.join(format!("c{:03}", skip + k));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("orig.tsx"), &text)?;
+        for m in Mutation::ALL {
+            if m == Mutation::LoopToComprehension {
+                continue; // Python only
+            }
+            let v = apply(m, Lang::Tsx, &text);
+            if v != text {
+                std::fs::write(dir.join(format!("{}.tsx", m.name().replace(' ', "_"))), v)?;
+            }
+        }
+        written += 1;
+    }
+    println!("wrote {written} component groups to {}", out.display());
+    Ok(())
+}

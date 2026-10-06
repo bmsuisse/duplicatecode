@@ -224,6 +224,20 @@ enum Cmd {
         #[arg(long)]
         dump: Option<PathBuf>,
     },
+    /// Build labeled React groups (component + mutated variants) for `eval-groups` from real TSX.
+    MakeMutationGroups {
+        #[arg(long)]
+        src: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 80)]
+        n: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Skip this many shuffled files first (use a different value for a disjoint holdout).
+        #[arg(long, default_value_t = 0)]
+        skip: usize,
+    },
     /// Evaluate the detector on the LLM-implementation benchmark dataset.
     Bench {
         #[arg(long, default_value = "dataset")]
@@ -431,6 +445,13 @@ fn main() -> Result<()> {
             };
             print!("{}", review::run(units, &src, &o));
         }
+        Cmd::MakeMutationGroups {
+            src,
+            out,
+            n,
+            seed,
+            skip,
+        } => groups::make_mutation_groups(&src, &out, n, seed, skip)?,
         Cmd::EvalGroups { root, quiet, dump } => groups::run(&root, quiet, dump.as_deref())?,
         Cmd::EmbedTest { embed, names } => {
             let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))

@@ -151,6 +151,51 @@ Python), keep the static path as the default, and re-measure on a larger unconta
 before choosing a default lambda.
 
 
+## Additions after the first report
+
+### Fragment-level clones (`duplicatecode fragments`)
+
+Benchmark (`eval/make_fragment_data.py`, `eval/eval_fragments.py`): a renamed block of N consecutive
+statements from one real function (Fabricks.Runtime) is pasted into a different function; the detector
+must report that pair with at least half the block overlapping. Constructors/dunders are excluded because
+the tool ignores them by design.
+
+| block size | recall at 5 stmts / 40 tokens | recall at 4 stmts / 30 tokens (default) |
+| --- | --- | --- |
+| 4 | 0.43 | 0.80 |
+| 6 | 0.86 | 0.93 |
+| 8 | 0.97 | 0.97 |
+| 10 | 0.89 | 0.95 |
+
+Sampled non-injected reports were real duplicates in the repo (the same secret-handling block, the same
+forecasting steps, `get_receivers` copied across three email providers), not noise. One bug found
+by looking at results: a one-line list comprehension is expanded into several pseudo-statements, so a
+repeated comprehension looked like a 4-statement block; the minimum now counts distinct source statements.
+On the full Fabricks.Runtime it takes under 3 s and finds, among others, whole copied folders
+(`cip` vs `cip2`) and a `BetterDatabricks` class duplicated in two modules.
+
+### Benchmark hygiene (after Allamanis, arXiv 1812.06469)
+
+Share of positive pairs by 4-gram overlap (near-exact >= 0.9 / 0.5-0.9 / independent < 0.5):
+python 0.00/0.01/0.99, javascript 0.00/0.01/0.98, fn-python 0.03/0.04/0.93, fn-typescript
+0.06/0.03/0.91, sql 0.17/0.26/0.57, react 0.43/0.55/0.03. The CodeNet and fn-* headline numbers are
+therefore measured on independent solutions, not inflated by copies; SQL and React are mostly mutated
+copies and stay regression guards.
+
+### Thresholds
+
+Score at a fixed false-positive rate on unrelated pairs is stable across datasets and between dev and
+holdout: about 0.25 at 1% FPR and 0.34 at 0.1% FPR (JavaScript 0.33 / 0.47). The `reimpl` profile's scores
+live well below the `copies` profile's 0.6, so a shared cut-off reported almost nothing; `reimpl` now
+defaults to 0.35 (`scan`), 0.28 (`diff`), 0.30 (`review`). Precision calibration is not offered: it depends
+on how common clones are in the corpus, which differs from any benchmark.
+
+### `--explain`
+
+`scan --pairs --explain` lists, per pair, the literals and calls only one side has and the source lines
+without a counterpart, e.g. `parallel_process` in `cip` vs `cip2`: "16 of 18/17 statements shared, differing
+lines 237-247 vs 95-107".
+
 ## What could still be optimized
 
 1. **Embeddings as an optional signal** (see above for the measured value). Design: keep the static path

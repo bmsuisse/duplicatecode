@@ -150,7 +150,11 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
                         .collect();
                     writeln!(
                         f,
-                        "{name}\t{}\t{}\t{}\t{}\t{}",
+                        "{name}\t{}:{}\t{}:{}\t{}\t{}\t{}\t{}\t{}",
+                        units[i].file,
+                        units[i].start_line,
+                        units[j].file,
+                        units[j].start_line,
                         group_of(&units[i]),
                         group_of(&units[j]),
                         units[i].tokens.len().min(units[j].tokens.len()),

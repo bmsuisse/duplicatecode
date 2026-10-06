@@ -45,11 +45,15 @@ impl Scores {
             self.stmt_exact,
             self.stmt_shape,
             self.stmt_lcs,
+            self.containment,
         ]
     }
 }
 
-pub const N_FEATURES: usize = 10;
+pub const N_FEATURES: usize = 11;
+const FEAT_LITERALS: usize = 3;
+const FEAT_API: usize = 4;
+const FEAT_CALLEES: usize = 6;
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "structural",
     "loose",
@@ -61,6 +65,7 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "stmt_exact",
     "stmt_shape",
     "stmt_lcs",
+    "containment",
 ];
 
 /// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
@@ -102,10 +107,10 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
+            w: [0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26],
             name_floor: 0.5,
-            file: Some([0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0]),
-            sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0]),
+            file: Some([0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0]),
+            sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0]),
         }
     }
 }
@@ -118,7 +123,7 @@ impl Weights {
     pub fn copies() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
+            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0],
             name_floor: 0.5,
             file: None,
             sql: None,
@@ -213,12 +218,30 @@ pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) 
         stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
         combined: 0.0,
     };
-    s.combined = weights.bias
-        + s.features()
-            .iter()
-            .zip(weights.w)
-            .map(|(f, w)| f * w)
-            .sum::<f64>();
+    // Features that neither side has (no literals, no calls, ...) say nothing: leave them out
+    // and spread their weight over the features that do apply.
+    let n = |x: &std::collections::BTreeSet<String>| x.is_empty();
+    let skip = [
+        (FEAT_LITERALS, n(&a.literals) && n(&b.literals)),
+        (FEAT_API, n(&a.api) && n(&b.api)),
+        (FEAT_CALLEES, n(&a.callees) && n(&b.callees)),
+    ];
+    let total: f64 = weights.w.iter().sum();
+    let skipped: f64 = skip.iter().filter(|x| x.1).map(|x| weights.w[x.0]).sum();
+    let scale = if total - skipped > 1e-9 {
+        total / (total - skipped)
+    } else {
+        1.0
+    };
+    let feats = s.features();
+    let sum: f64 = feats
+        .iter()
+        .zip(weights.w)
+        .enumerate()
+        .filter(|(i, _)| !skip.iter().any(|x| x.1 && x.0 == *i))
+        .map(|(_, (f, w))| f * w)
+        .sum();
+    s.combined = weights.bias + scale * sum;
     s
 }
 
@@ -389,8 +412,17 @@ impl Corpus {
                 .collect();
         }
         let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
+        // features absent on both sides are renormalized away, which can raise a score by at most
+        // `scale_max`; bound with it so the prefilter stays exact
+        let total: f64 = w.w.iter().sum();
+        let skippable = w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES];
+        let scale_max = if total - skippable > 1e-9 {
+            total / (total - skippable)
+        } else {
+            1.0
+        };
         let min_jaccard = if w.w[0] > 0.0 {
-            ((threshold - rest) / w.w[0]).max(0.0)
+            ((threshold / scale_max - rest) / w.w[0]).max(0.0)
         } else {
             0.0
         };

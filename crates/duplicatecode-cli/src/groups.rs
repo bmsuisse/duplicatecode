@@ -148,7 +148,6 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
                         .iter()
                         .map(|x| format!("{x:.5}"))
                         .collect();
-                    feats.push(format!("{:.5}", all[i][j].containment));
                     writeln!(
                         f,
                         "{name}\t{}\t{}\t{}\t{}\t{}",

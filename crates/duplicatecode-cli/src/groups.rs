@@ -131,11 +131,12 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
             use std::io::Write;
             for i in 0..n {
                 for j in i + 1..n {
-                    let feats: Vec<String> = all[i][j]
+                    let mut feats: Vec<String> = all[i][j]
                         .features()
                         .iter()
                         .map(|x| format!("{x:.5}"))
                         .collect();
+                    feats.push(format!("{:.5}", all[i][j].containment));
                     writeln!(
                         f,
                         "{name}\t{}\t{}\t{}\t{}\t{}",

@@ -99,7 +99,8 @@ struct Features {
 pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let mut parser = Parser::new();
     parser.set_language(&lang.ts_language()).ok()?;
-    let pruned = prune_dead_toplevel(&mut parser, lang, source);
+    let inlined = inline_entry_point(&mut parser, lang, source);
+    let pruned = prune_dead_toplevel(&mut parser, lang, &inlined);
     let source = pruned.as_str();
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
@@ -244,6 +245,95 @@ fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Python: `def main(): <body>` called once from top level (directly or under
+/// `if __name__ == "__main__":`) is the same program as `<body>` at top level, so inline it.
+fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
+    if lang != Lang::Python {
+        return source.to_string();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return source.to_string();
+    };
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    let text = |n: Node| n.utf8_text(src).unwrap_or("");
+    let is_bare_call = |n: Node, name: &str| {
+        n.kind() == "expression_statement"
+            && n.named_child(0).is_some_and(|c| {
+                c.kind() == "call"
+                    && c.child_by_field_name("function")
+                        .is_some_and(|f| text(f) == name)
+                    && c.child_by_field_name("arguments")
+                        .is_some_and(|a| a.named_child_count() == 0)
+            })
+    };
+    for def in root.named_children(&mut root.walk()) {
+        if def.kind() != "function_definition" {
+            continue;
+        }
+        let (Some(name), Some(params), Some(body)) = (
+            def.child_by_field_name("name"),
+            def.child_by_field_name("parameters"),
+            def.child_by_field_name("body"),
+        ) else {
+            continue;
+        };
+        let name = text(name);
+        if params.named_child_count() != 0 {
+            continue;
+        }
+        // all identifier uses of the name: the definition plus exactly one top-level call
+        let mut uses = 0;
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            if n.child_count() == 0 && n.kind() == "identifier" && text(n) == name {
+                uses += 1;
+            }
+            stack.extend(n.children(&mut n.walk()));
+        }
+        if uses != 2 {
+            continue;
+        }
+        // the call, bare or as the only statement of a `__name__ == "__main__"` guard
+        let mut call_range = None;
+        for st in root.named_children(&mut root.walk()) {
+            if is_bare_call(st, name) {
+                call_range = Some((st.start_byte(), st.end_byte()));
+            } else if st.kind() == "if_statement"
+                && st
+                    .child_by_field_name("condition")
+                    .is_some_and(|c| text(c).contains("__name__"))
+            {
+                let cons = st.child_by_field_name("consequence");
+                if let Some(b) = cons.filter(|b| b.named_child_count() == 1) {
+                    if b.named_child(0).is_some_and(|c| is_bare_call(c, name)) {
+                        call_range = Some((st.start_byte(), st.end_byte()));
+                    }
+                }
+            }
+        }
+        let Some((cs, ce)) = call_range else { continue };
+        if cs < def.end_byte() {
+            continue; // call before the definition: keep the order as written
+        }
+        // dedent the body by the indentation of its first line
+        let first = body.start_position().column;
+        let body_text = &source[body.start_byte() - first..body.end_byte()];
+        let dedented: String = body_text
+            .lines()
+            .map(|l| l.get(first..).unwrap_or(l.trim_start()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = String::with_capacity(source.len());
+        out.push_str(&source[..def.start_byte()]);
+        out.push_str(&dedented);
+        out.push_str(&source[def.end_byte()..cs]);
+        out.push_str(&source[ce..]);
+        return out;
+    }
+    source.to_string()
 }
 
 /// Blank out top-level functions, classes and imports that nothing else in the file references
@@ -1288,6 +1378,22 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn python_main_wrapper_equals_top_level_code() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let flat = f("n = int(input())\nprint(n * 2)\n");
+        let wrapped = f("def main():\n    n = int(input())\n    print(n * 2)\n\nif __name__ == '__main__':\n    main()\n");
+        let called = f("def solve():\n    n = int(input())\n    print(n * 2)\n\nsolve()\n");
+        assert_eq!(flat, wrapped);
+        assert_eq!(flat, called);
+        // functions with parameters or used twice are real functions, not entry points
+        assert_ne!(flat, f("def main(x):\n    print(x)\n\nmain(1)\n"));
+        assert_ne!(
+            flat,
+            f("def main():\n    n = int(input())\n    print(n * 2)\n\nmain()\nmain()\n")
+        );
+    }
+
     #[test]
     fn sql_ignores_case_aliases_and_formatting_but_not_tables() {
         let f = |src: &str| extract_file_unit("q.sql", Lang::Sql, src).unwrap().tokens;

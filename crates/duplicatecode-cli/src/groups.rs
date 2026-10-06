@@ -96,7 +96,8 @@ fn evaluate(units: &[Unit], pick: Pick, all: &[Vec<Scores>]) -> Report {
     }
 }
 
-pub fn run(root: &Path, quiet: bool) -> Result<()> {
+pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
+    let mut dump_out = dump.map(|p| std::fs::File::create(p)).transpose()?;
     let mut datasets: Vec<_> = std::fs::read_dir(root)?
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -117,6 +118,23 @@ pub fn run(root: &Path, quiet: bool) -> Result<()> {
             .into_par_iter()
             .map(|i| (0..n).map(|j| score(&units[i], &units[j])).collect())
             .collect();
+        if let Some(f) = dump_out.as_mut() {
+            use std::io::Write;
+            for i in 0..n {
+                for j in i + 1..n {
+                    let feats: Vec<String> = all[i][j].features().iter().map(|x| format!("{x:.5}")).collect();
+                    writeln!(
+                        f,
+                        "{name}\t{}\t{}\t{}\t{}\t{}",
+                        group_of(&units[i]),
+                        group_of(&units[j]),
+                        units[i].tokens.len().min(units[j].tokens.len()),
+                        units[i].tokens.len().max(units[j].tokens.len()),
+                        feats.join("\t")
+                    )?;
+                }
+            }
+        }
         let groups: std::collections::BTreeSet<&str> = units.iter().map(group_of).collect();
         if !quiet {
             println!("== {name}: {n} files, {} groups", groups.len());

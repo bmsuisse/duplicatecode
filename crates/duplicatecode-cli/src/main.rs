@@ -220,6 +220,9 @@ enum Cmd {
         /// Print only the final `score=` line.
         #[arg(long)]
         quiet: bool,
+        /// Write every pair's feature vector (TSV) for offline analysis.
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
     /// Evaluate the detector on the LLM-implementation benchmark dataset.
     Bench {
@@ -428,7 +431,7 @@ fn main() -> Result<()> {
             };
             print!("{}", review::run(units, &src, &o));
         }
-        Cmd::EvalGroups { root, quiet } => groups::run(&root, quiet)?,
+        Cmd::EvalGroups { root, quiet, dump } => groups::run(&root, quiet, dump.as_deref())?,
         Cmd::EmbedTest { embed, names } => {
             let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
                 .context(

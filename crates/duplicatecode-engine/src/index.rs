@@ -76,7 +76,7 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
+            w: [0.30, 0.38, 0.0, 0.05, 0.0, 0.05, 0.05, 0.12, 0.05, 0.0],
             name_floor: 0.5,
         }
     }

@@ -867,6 +867,10 @@ impl Ctx<'_> {
             }
             // statement terminators are optional in JS/TS (ASI): `a=1;` and `a=1` are the same code
             ";" if matches!(self.lang, Lang::TypeScript | Lang::Tsx) => {}
+            // block braces are optional around single statements
+            "{" | "}"
+                if matches!(self.lang, Lang::TypeScript | Lang::Tsx)
+                    && node.parent().is_some_and(|p| p.kind() == "statement_block") => {}
             _ if node.child_count() == 0 => out.push(norm_leaf(kind).to_string()),
             _ => self.norm_children(node, out, skip_blocks),
         }

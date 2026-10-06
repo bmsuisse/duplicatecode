@@ -12,13 +12,23 @@ use std::io::Read;
 use std::path::PathBuf;
 
 /// Optional semantic name similarity (Azure AI Foundry / Azure OpenAI / OpenAI-compatible embeddings).
-/// Configure with OPENAI_API_KEY [+ OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL], or AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
+/// Configure with OPENAI_API_KEY [+ OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL], COHERE_API_KEY [+ COHERE_EMBEDDING_MODEL], or AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
 /// AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT. Vectors are cached in a flat file.
 #[derive(clap::Args, Clone)]
 struct EmbedArgs {
     /// Embed unit names and use the cosine as an extra name-similarity signal.
     #[arg(long)]
     embeddings: bool,
+    /// Embed the full text of every unit (function, class, file, statement) and blend the cosine of
+    /// the two vectors into the score. Finds re-implementations that share no tokens.
+    #[arg(long)]
+    embed_code: bool,
+    /// Weight of the code-embedding cosine in the blended score (others are scaled by 1 - weight).
+    #[arg(long, default_value_t = 0.35)]
+    embed_weight: f64,
+    /// Characters of each unit sent to the embedding model.
+    #[arg(long, default_value_t = 3000)]
+    embed_max_chars: usize,
     /// Vector size requested from the service (text-embedding-3 models accept shorter vectors).
     #[arg(long, default_value_t = 256)]
     embed_dims: u32,
@@ -32,33 +42,57 @@ struct EmbedArgs {
 
 impl EmbedArgs {
     fn apply(&self, units: &mut [duplicatecode_engine::Unit]) -> Result<()> {
-        if !self.embeddings {
+        if !self.embeddings && !self.embed_code {
             return Ok(());
         }
         let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
-            .context("--embeddings needs OPENAI_API_KEY (optionally OPENAI_BASE_URL for compatible servers) or AZURE_AI_FOUNDRY_ENDPOINT / AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT")?;
+            .context("--embeddings/--embed-code need OPENAI_API_KEY (optionally OPENAI_BASE_URL for compatible servers), COHERE_API_KEY or AZURE_AI_FOUNDRY_ENDPOINT / AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT")?;
         let path = self
             .embed_cache
             .clone()
             .unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
         let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
-        let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache)
+        if self.embeddings {
+            let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache)
+                .map_err(anyhow::Error::msg)?;
+            eprintln!(
+                "embeddings: {} distinct names ({} cached, {} fetched) via {} [{}]",
+                st.distinct_names,
+                st.from_cache,
+                st.fetched,
+                cfg.model_id(),
+                path.display()
+            );
+        }
+        if self.embed_code {
+            let st = duplicatecode_engine::embed::embed_unit_code(
+                units,
+                &cfg,
+                &mut cache,
+                self.embed_max_chars,
+            )
             .map_err(anyhow::Error::msg)?;
-        eprintln!(
-            "embeddings: {} distinct names ({} cached, {} fetched) via {} [{}]",
-            st.distinct_names,
-            st.from_cache,
-            st.fetched,
-            cfg.model_id(),
-            path.display()
-        );
+            eprintln!(
+                "code embeddings: {} distinct units ({} cached, {} fetched) via {} [{}]",
+                st.distinct_names,
+                st.from_cache,
+                st.fetched,
+                cfg.model_id(),
+                path.display()
+            );
+        }
         Ok(())
     }
 
     fn weights(&self, w: Weights) -> Weights {
-        Weights {
+        let w = Weights {
             name_floor: self.embed_floor,
             ..w
+        };
+        if self.embed_code {
+            w.with_embed(self.embed_weight)
+        } else {
+            w
         }
     }
 }
@@ -223,6 +257,8 @@ enum Cmd {
         /// Write every pair's feature vector (TSV) for offline analysis.
         #[arg(long)]
         dump: Option<PathBuf>,
+        #[command(flatten)]
+        embed: EmbedArgs,
     },
     /// Build labeled React groups (component + mutated variants) for `eval-groups` from real TSX.
     MakeMutationGroups {
@@ -452,7 +488,18 @@ fn main() -> Result<()> {
             seed,
             skip,
         } => groups::make_mutation_groups(&src, &out, n, seed, skip)?,
-        Cmd::EvalGroups { root, quiet, dump } => groups::run(&root, quiet, dump.as_deref())?,
+        Cmd::EvalGroups {
+            root,
+            quiet,
+            dump,
+            embed,
+        } => groups::run(
+            &root,
+            quiet,
+            dump.as_deref(),
+            &|u| embed.apply(u),
+            embed.weights(Weights::default()),
+        )?,
         Cmd::EmbedTest { embed, names } => {
             let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
                 .context(

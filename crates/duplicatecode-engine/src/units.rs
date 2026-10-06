@@ -57,6 +57,12 @@ pub struct Unit {
     pub name_vec: Option<std::sync::Arc<[f32]>>,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
+    /// Source text of the unit (embedded as a whole when code embeddings are enabled).
+    #[serde(skip)]
+    pub text: std::sync::Arc<str>,
+    /// Unit-length embedding of `text` (only when code embeddings are enabled).
+    #[serde(skip)]
+    pub vec: Option<std::sync::Arc<[f32]>>,
 }
 
 impl Unit {
@@ -639,6 +645,8 @@ impl Ctx<'_> {
             lines: (node.end_position().row - node.start_position().row + 1) as u32,
             name_vec: None,
             name_parts,
+            text: self.text(node).into(),
+            vec: None,
         });
     }
 

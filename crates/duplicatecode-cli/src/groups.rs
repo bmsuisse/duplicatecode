@@ -96,7 +96,13 @@ fn evaluate(units: &[Unit], pick: Pick, all: &[Vec<Scores>]) -> Report {
     }
 }
 
-pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
+pub fn run(
+    root: &Path,
+    quiet: bool,
+    dump: Option<&Path>,
+    prepare: &dyn Fn(&mut [Unit]) -> Result<()>,
+    weights: Weights,
+) -> Result<()> {
     let mut dump_out = dump.map(|p| std::fs::File::create(p)).transpose()?;
     let mut datasets: Vec<_> = std::fs::read_dir(root)?
         .filter_map(Result::ok)
@@ -124,9 +130,9 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
             load_file_units(&dir)
         };
         units.sort_by(|a, b| (&a.file, a.start_line).cmp(&(&b.file, b.start_line)));
+        prepare(&mut units)?;
         let n = units.len();
         let idf = Idf::from_units(&units);
-        let weights = Weights::default();
         // full score matrix once; each signal is a projection of it
         let all: Vec<Vec<Scores>> = (0..n)
             .into_par_iter()

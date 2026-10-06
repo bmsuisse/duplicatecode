@@ -34,20 +34,34 @@ duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives 
 
 ## Embeddings (bring your own key)
 
-`--embeddings` adds a semantic name-similarity signal. Credentials come from the environment:
+Two optional signals, both off by default (the detector stays LLM-free unless you ask):
+
+- `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
+- `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
+  the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
+  re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from
+  0.70 to 0.89 on a held-out half; see `eval/REPORT.md` for the numbers and caveats. Vectors are cached per
+  unit text in `~/.cache/duplicatecode/embeddings.bin`, so a rescan only embeds what changed.
+
+Credentials come from the environment:
 
 ```sh
 # OpenAI
 export OPENAI_API_KEY=sk-...                      # optional: OPENAI_EMBEDDING_MODEL (default text-embedding-3-small)
+# Cohere (native /v2/embed)
+export COHERE_API_KEY=...                         # optional: COHERE_EMBEDDING_MODEL (default embed-v4.0)
 # OpenAI-compatible server (vLLM, Ollama, LiteLLM, ...)
 export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_EMBEDDING_MODEL=nomic-embed-text
 # Azure AI Foundry (key, or `az login` if no key is set)
 export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
 export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
 # Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+# Fully local, no key: `uv run --no-project --python 3.12 eval/embed_server.py`, then
+export DUPLICATECODE_EMBED_ENDPOINT=http://127.0.0.1:8099/v1 DUPLICATECODE_EMBED_API_KEY=local DUPLICATECODE_EMBED_MODEL=qwen3
 
 duplicatecode embed-test fetchUser getUser     # check credentials
-duplicatecode scan . --embeddings
+duplicatecode scan . --embed-code              # whole-unit embeddings
+duplicatecode scan . --embeddings              # names only
 ```
 
 ## How it works

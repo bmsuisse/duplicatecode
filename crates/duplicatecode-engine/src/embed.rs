@@ -17,6 +17,8 @@ pub enum Style {
     Foundry,
     /// `{endpoint}/embeddings` with `model` in the body (OpenAI and compatible servers)
     OpenAi,
+    /// `{endpoint}/v2/embed` (Cohere): `texts` + `input_type`, vectors under `embeddings.float`
+    Cohere,
 }
 
 #[derive(Clone, Debug)]
@@ -48,10 +50,10 @@ impl EmbedConfig {
             "AZURE_OPENAI_ENDPOINT",
             "DUPLICATECODE_EMBED_ENDPOINT",
             "OPENAI_BASE_URL",
+            "COHERE_BASE_URL",
         ])
-        .or_else(|| {
-            env_first(&["OPENAI_API_KEY"]).map(|_| "https://api.openai.com/v1".to_string())
-        })?;
+        .or_else(|| env_first(&["OPENAI_API_KEY"]).map(|_| "https://api.openai.com/v1".to_string()))
+        .or_else(|| env_first(&["COHERE_API_KEY"]).map(|_| "https://api.cohere.com".to_string()))?;
         Some(EmbedConfig::new(
             endpoint,
             env_first(&[
@@ -59,13 +61,23 @@ impl EmbedConfig {
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
                 "DUPLICATECODE_EMBED_MODEL",
                 "OPENAI_EMBEDDING_MODEL",
+                "COHERE_EMBEDDING_MODEL",
             ])
-            .unwrap_or_else(|| "text-embedding-3-small".into()),
+            .unwrap_or_else(|| {
+                if env_first(&["COHERE_API_KEY"]).is_some()
+                    && env_first(&["OPENAI_API_KEY", "OPENAI_BASE_URL"]).is_none()
+                {
+                    "embed-v4.0".into()
+                } else {
+                    "text-embedding-3-small".into()
+                }
+            }),
             env_first(&[
                 "AZURE_AI_FOUNDRY_API_KEY",
                 "AZURE_OPENAI_API_KEY",
                 "DUPLICATECODE_EMBED_API_KEY",
                 "OPENAI_API_KEY",
+                "COHERE_API_KEY",
             ]),
             env_first(&["AZURE_AI_FOUNDRY_API_VERSION", "AZURE_OPENAI_API_VERSION"]),
             dims,
@@ -80,7 +92,9 @@ impl EmbedConfig {
         dims: Option<u32>,
     ) -> Self {
         let e = endpoint.trim_end_matches('/').to_string();
-        let style = if e.contains(".openai.azure.com") {
+        let style = if e.contains("cohere.com") || e.contains("cohere.ai") {
+            Style::Cohere
+        } else if e.contains(".openai.azure.com") {
             Style::AzureOpenAi
         } else if e.contains(".services.ai.azure.com")
             || e.contains(".inference.ai.azure.com")
@@ -124,10 +138,24 @@ impl EmbedConfig {
                 self.api_version.as_deref().unwrap_or("2024-05-01-preview")
             ),
             Style::OpenAi => format!("{}/embeddings", self.endpoint),
+            Style::Cohere => format!("{}/v2/embed", self.endpoint),
         }
     }
 
     fn body(&self, texts: &[String]) -> serde_json::Value {
+        if self.style == Style::Cohere {
+            let mut b = serde_json::json!({
+                "model": self.deployment,
+                "texts": texts,
+                "input_type": "search_document",
+                "embedding_types": ["float"],
+            });
+            // only embed-v4.0 accepts a reduced output size
+            if let Some(d) = self.dims.filter(|_| self.deployment.contains("v4")) {
+                b["output_dimension"] = d.into();
+            }
+            return b;
+        }
         let mut b = serde_json::json!({ "input": texts });
         if self.style != Style::AzureOpenAi {
             b["model"] = self.deployment.clone().into();
@@ -142,7 +170,7 @@ impl EmbedConfig {
         if let Some(k) = &self.api_key {
             return Ok(match self.style {
                 // OpenAI and compatible servers expect a bearer token; Azure uses `api-key`.
-                Style::OpenAi => ("Authorization".into(), format!("Bearer {k}")),
+                Style::OpenAi | Style::Cohere => ("Authorization".into(), format!("Bearer {k}")),
                 _ => ("api-key".into(), k.clone()),
             });
         }
@@ -179,6 +207,17 @@ impl EmbedConfig {
             match ureq::post(&url).set(&hk, &hv).send_json(body.clone()) {
                 Ok(resp) => {
                     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+                    if self.style == Style::Cohere {
+                        let rows = parse_cohere(&v)?;
+                        if rows.len() != texts.len() {
+                            return Err(format!(
+                                "expected {} embeddings, got {}",
+                                texts.len(),
+                                rows.len()
+                            ));
+                        }
+                        return Ok(rows);
+                    }
                     let mut rows: Vec<(usize, Vec<f32>)> = v["data"]
                         .as_array()
                         .ok_or("response has no `data` array")?
@@ -230,6 +269,20 @@ impl EmbedConfig {
         }
         Err(format!("embedding request failed: {last}"))
     }
+}
+
+/// Cohere v2: `{"embeddings": {"float": [[...], ...]}}`
+fn parse_cohere(v: &serde_json::Value) -> Result<Vec<Vec<f32>>, String> {
+    v["embeddings"]["float"]
+        .as_array()
+        .ok_or("response has no `embeddings.float` array")?
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+                .ok_or_else(|| "embedding row is not an array".to_string())
+        })
+        .collect()
 }
 
 /// Append-only flat-file cache: repeated records of
@@ -388,6 +441,56 @@ pub fn embed_unit_names(
     Ok(stats)
 }
 
+fn code_key(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    format!("code:{:016x}:{}", h.finish(), text.len())
+}
+
+/// Attach a unit-length embedding of every unit's source text (cache first, then the endpoint in
+/// small batches; texts are cut at `max_chars`). Identical texts are embedded once.
+pub fn embed_unit_code(
+    units: &mut [Unit],
+    cfg: &EmbedConfig,
+    cache: &mut EmbeddingCache,
+    max_chars: usize,
+) -> Result<EmbedStats, String> {
+    let model = format!("{}:code", cfg.model_id());
+    let cut = |t: &str| -> String { t.chars().take(max_chars).collect() };
+    let mut want: HashMap<String, String> = HashMap::new();
+    for u in units.iter() {
+        let t = cut(&u.text);
+        if !t.trim().is_empty() {
+            want.entry(code_key(&t)).or_insert(t);
+        }
+    }
+    let mut stats = EmbedStats {
+        distinct_names: want.len(),
+        ..Default::default()
+    };
+    let mut missing: Vec<(String, String)> = want
+        .iter()
+        .filter(|(k, _)| cache.get(&model, k).is_none())
+        .map(|(k, t)| (k.clone(), t.clone()))
+        .collect();
+    missing.sort();
+    stats.from_cache = want.len() - missing.len();
+    for chunk in missing.chunks(16) {
+        let texts: Vec<String> = chunk.iter().map(|c| c.1.clone()).collect();
+        let vecs = cfg.embed_batch(&texts)?;
+        for ((k, _), v) in chunk.iter().zip(vecs) {
+            cache.insert(&model, k, normalize(v));
+        }
+        stats.fetched += chunk.len();
+        cache.flush().map_err(|e| e.to_string())?;
+    }
+    for u in units.iter_mut() {
+        u.vec = cache.get(&model, &code_key(&cut(&u.text)));
+    }
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +619,47 @@ mod tests {
     }
 
     #[test]
+    fn embeds_unit_code_once_per_distinct_text() {
+        let (reqs, seen) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(std::sync::Mutex::new(vec![])),
+        );
+        let cfg = EmbedConfig::new(
+            fake_server(reqs.clone(), seen),
+            "m".into(),
+            Some("k".into()),
+            None,
+            Some(3),
+        );
+        let path = std::env::temp_dir().join(format!("dc-embed-code-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut units: Vec<Unit> = ["a", "b", "a"]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, n)| {
+                crate::extract_units(
+                    &format!("{i}.py"),
+                    crate::Lang::Python,
+                    &format!(
+                        "def f(x):\n    return x + {}\n",
+                        if *n == "a" { 1 } else { 2 }
+                    ),
+                )
+            })
+            .collect();
+        let mut cache = EmbeddingCache::load(&path);
+        let st = embed_unit_code(&mut units, &cfg, &mut cache, 3000).unwrap();
+        assert_eq!((st.distinct_names, st.fetched), (2, 2));
+        assert!(units.iter().all(|u| u.vec.is_some()));
+        assert_eq!(units[0].vec, units[2].vec);
+        assert_ne!(units[0].vec, units[1].vec);
+        let st2 =
+            embed_unit_code(&mut units, &cfg, &mut EmbeddingCache::load(&path), 3000).unwrap();
+        assert_eq!((st2.fetched, st2.from_cache), (0, 2));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn detects_provider_style_and_urls() {
         let az = EmbedConfig::new(
             "https://r.openai.azure.com/".into(),
@@ -557,6 +701,41 @@ mod tests {
             mk("https://r.openai.azure.com").auth().unwrap(),
             ("api-key".into(), "sk-1".into())
         );
+    }
+
+    #[test]
+    fn cohere_style_url_body_auth_and_response() {
+        let c = EmbedConfig::new(
+            "https://api.cohere.com/".into(),
+            "embed-v4.0".into(),
+            Some("co-key".into()),
+            None,
+            Some(256),
+        );
+        assert_eq!(c.style, Style::Cohere);
+        assert_eq!(c.url(), "https://api.cohere.com/v2/embed");
+        assert_eq!(
+            c.auth().unwrap(),
+            ("Authorization".into(), "Bearer co-key".into())
+        );
+        let b = c.body(&["x".into(), "y".into()]);
+        assert_eq!(b["texts"].as_array().unwrap().len(), 2);
+        assert_eq!(b["input_type"], "search_document");
+        assert_eq!(b["output_dimension"], 256);
+        // v3 models do not accept output_dimension
+        let v3 = EmbedConfig::new(
+            "https://api.cohere.com".into(),
+            "embed-english-v3.0".into(),
+            None,
+            None,
+            Some(256),
+        );
+        assert!(v3.body(&["x".into()]).get("output_dimension").is_none());
+        let rows =
+            parse_cohere(&serde_json::json!({"embeddings": {"float": [[1.0, 2.0], [3.0, 4.0]]}}))
+                .unwrap();
+        assert_eq!(rows, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert!(parse_cohere(&serde_json::json!({"embeddings": {}})).is_err());
     }
 
     #[test]

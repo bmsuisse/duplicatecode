@@ -28,6 +28,8 @@ pub struct Scores {
     pub stmt_shape: f64,
     /// Order-aware alignment (LCS) of statement shapes.
     pub stmt_lcs: f64,
+    /// Cosine of the whole-unit code embeddings; 0 when either side has none.
+    pub embed: f64,
     pub combined: f64,
 }
 
@@ -46,14 +48,16 @@ impl Scores {
             self.stmt_shape,
             self.stmt_lcs,
             self.containment,
+            self.embed,
         ]
     }
 }
 
-pub const N_FEATURES: usize = 11;
+pub const N_FEATURES: usize = 12;
 const FEAT_LITERALS: usize = 3;
 const FEAT_API: usize = 4;
 const FEAT_CALLEES: usize = 6;
+const FEAT_EMBED: usize = 11;
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "structural",
     "loose",
@@ -66,6 +70,7 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "stmt_shape",
     "stmt_lcs",
     "containment",
+    "embed",
 ];
 
 /// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
@@ -86,6 +91,23 @@ pub struct Weights {
 }
 
 impl Weights {
+    /// Give the code-embedding cosine weight `lambda` and scale every other weight by `1 - lambda`
+    /// (also in the file/SQL overrides). Units without vectors skip the feature (see `renormalize`).
+    pub fn with_embed(&self, lambda: f64) -> Weights {
+        let mix = |w: [f64; N_FEATURES]| {
+            let mut o = w.map(|x| x * (1.0 - lambda));
+            o[FEAT_EMBED] = lambda;
+            o
+        };
+        Weights {
+            w: mix(self.w),
+            file: self.file.map(mix),
+            sql: self.sql.map(mix),
+            renormalize: true,
+            ..*self
+        }
+    }
+
     /// The weights to use when comparing units like `u`.
     pub fn for_unit(&self, u: &Unit) -> Weights {
         let over = match (u.lang, u.kind.as_str()) {
@@ -110,11 +132,17 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26],
+            w: [
+                0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26, 0.0,
+            ],
             name_floor: 0.5,
             renormalize: true,
-            file: Some([0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0]),
-            sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0]),
+            file: Some([
+                0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0, 0.0,
+            ]),
+            sql: Some([
+                0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ]),
         }
     }
 }
@@ -127,7 +155,9 @@ impl Weights {
     pub fn copies() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0],
+            w: [
+                0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0, 0.0,
+            ],
             name_floor: 0.5,
             renormalize: false,
             file: None,
@@ -221,6 +251,15 @@ pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) 
         stmt_exact: multiset_dice(&a.stmts_exact, &b.stmts_exact),
         stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
         stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
+        embed: match (&a.vec, &b.vec) {
+            (Some(x), Some(y)) if x.len() == y.len() => x
+                .iter()
+                .zip(y.iter())
+                .map(|(p, q)| (*p as f64) * (*q as f64))
+                .sum::<f64>()
+                .clamp(0.0, 1.0),
+            _ => 0.0,
+        },
         combined: 0.0,
     };
     // Features that neither side has (no literals, no calls, ...) say nothing: leave them out
@@ -427,7 +466,7 @@ impl Corpus {
         // `scale_max`; bound with it so the prefilter stays exact
         let total: f64 = w.w.iter().sum();
         let skippable = if w.renormalize {
-            w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES]
+            w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES] + w.w[FEAT_EMBED]
         } else {
             0.0
         };

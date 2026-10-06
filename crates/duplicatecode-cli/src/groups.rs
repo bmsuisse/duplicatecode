@@ -4,7 +4,7 @@
 //! dataset are scored. Reports AUC, recall at fixed false-positive rates and top-1 retrieval.
 
 use anyhow::{bail, Result};
-use duplicatecode_engine::index::{score, Scores};
+use duplicatecode_engine::index::{score_with_idf, Idf, Scores, Weights};
 use duplicatecode_engine::{load_file_units, Unit};
 use rayon::prelude::*;
 use std::path::Path;
@@ -105,7 +105,10 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
         .collect();
     datasets.sort();
     if datasets.is_empty() {
-        bail!("no datasets below {} (run eval/fetch_codenet.py)", root.display());
+        bail!(
+            "no datasets below {} (run eval/fetch_codenet.py)",
+            root.display()
+        );
     }
     let mut headline = Vec::new();
     for dir in datasets {
@@ -113,16 +116,26 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
         let mut units = load_file_units(&dir);
         units.sort_by(|a, b| a.file.cmp(&b.file));
         let n = units.len();
+        let idf = Idf::from_units(&units);
+        let weights = Weights::default();
         // full score matrix once; each signal is a projection of it
         let all: Vec<Vec<Scores>> = (0..n)
             .into_par_iter()
-            .map(|i| (0..n).map(|j| score(&units[i], &units[j])).collect())
+            .map(|i| {
+                (0..n)
+                    .map(|j| score_with_idf(&units[i], &units[j], &weights, Some(&idf)))
+                    .collect()
+            })
             .collect();
         if let Some(f) = dump_out.as_mut() {
             use std::io::Write;
             for i in 0..n {
                 for j in i + 1..n {
-                    let feats: Vec<String> = all[i][j].features().iter().map(|x| format!("{x:.5}")).collect();
+                    let feats: Vec<String> = all[i][j]
+                        .features()
+                        .iter()
+                        .map(|x| format!("{x:.5}"))
+                        .collect();
                     writeln!(
                         f,
                         "{name}\t{}\t{}\t{}\t{}\t{}",
@@ -138,7 +151,10 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
         let groups: std::collections::BTreeSet<&str> = units.iter().map(group_of).collect();
         if !quiet {
             println!("== {name}: {n} files, {} groups", groups.len());
-            println!("{:<12} {:>6} {:>8} {:>8} {:>7}", "signal", "AUC", "TPR@1%", "TPR@5%", "top1");
+            println!(
+                "{:<12} {:>6} {:>8} {:>8} {:>7}",
+                "signal", "AUC", "TPR@1%", "TPR@5%", "top1"
+            );
         }
         for (label, pick) in SIGNALS {
             let r = evaluate(&units, pick, &all);

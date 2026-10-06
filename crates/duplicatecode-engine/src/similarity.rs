@@ -10,6 +10,28 @@ pub fn jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
     inter as f64 / union as f64
 }
 
+/// Weighted Jaccard: sum of weights of A ∩ B over sum of weights of A ∪ B.
+pub fn weighted_jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>, w: impl Fn(&T) -> f64) -> f64 {
+    let (mut inter, mut union) = (0.0, 0.0);
+    for x in a {
+        let wx = w(x);
+        union += wx;
+        if b.contains(x) {
+            inter += wx;
+        }
+    }
+    for x in b {
+        if !a.contains(x) {
+            union += w(x);
+        }
+    }
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
 /// |A ∩ B| / min(|A|, |B|): high when one unit is (nearly) contained in the other.
 pub fn containment<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
     let m = a.len().min(b.len());

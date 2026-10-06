@@ -1,7 +1,8 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice};
+use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice, weighted_jaccard};
 use crate::units::Unit;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Scores {
@@ -100,6 +101,37 @@ pub fn score(a: &Unit, b: &Unit) -> Scores {
     score_with(a, b, &Weights::default())
 }
 
+/// Inverse document frequency of token n-grams over a set of units: n-grams that occur in most
+/// units (I/O boilerplate, loop headers) say little about whether two units are clones.
+pub struct Idf {
+    fp: HashMap<u64, f64>,
+    fp2: HashMap<u64, f64>,
+}
+
+impl Idf {
+    pub fn from_units(units: &[Unit]) -> Idf {
+        fn table<'a>(
+            sets: impl Iterator<Item = &'a std::collections::BTreeSet<u64>>,
+            n: usize,
+        ) -> HashMap<u64, f64> {
+            let mut df: HashMap<u64, u32> = HashMap::new();
+            for s in sets {
+                for g in s {
+                    *df.entry(*g).or_default() += 1;
+                }
+            }
+            df.into_iter()
+                .map(|(g, d)| (g, (1.0 + n as f64 / d as f64).ln()))
+                .collect()
+        }
+        let n = units.len().max(1);
+        Idf {
+            fp: table(units.iter().map(|u| &u.fingerprint), n),
+            fp2: table(units.iter().map(|u| &u.fingerprint2), n),
+        }
+    }
+}
+
 /// Lexical subword overlap, or — when both names have embeddings — the better of that and the
 /// calibrated embedding cosine (so `pickName` ~ `pickLocalizedLabel` can still register).
 fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
@@ -118,9 +150,27 @@ fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
 }
 
 pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
+    score_with_idf(a, b, weights, None)
+}
+
+pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
+    let (structural, loose) = match idf {
+        Some(i) => (
+            weighted_jaccard(&a.fingerprint, &b.fingerprint, |g| {
+                i.fp.get(g).copied().unwrap_or(1.0)
+            }),
+            weighted_jaccard(&a.fingerprint2, &b.fingerprint2, |g| {
+                i.fp2.get(g).copied().unwrap_or(1.0)
+            }),
+        ),
+        None => (
+            jaccard(&a.fingerprint, &b.fingerprint),
+            jaccard(&a.fingerprint2, &b.fingerprint2),
+        ),
+    };
     let mut s = Scores {
-        structural: jaccard(&a.fingerprint, &b.fingerprint),
-        loose: jaccard(&a.fingerprint2, &b.fingerprint2),
+        structural,
+        loose,
         containment: containment(&a.fingerprint, &b.fingerprint),
         kinds: cosine(&a.kinds, &b.kinds),
         literals: jaccard(&a.literals, &b.literals),

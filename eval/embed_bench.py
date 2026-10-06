@@ -15,22 +15,21 @@ import argparse, json, pathlib, re, subprocess, time
 
 import numpy as np, pandas as pd
 import embed_anything
-from embed_anything import EmbeddingModel
 from sklearn.metrics import roc_auc_score
 
-BIN = "duplicatecode"
+# Keep F, W_FN and W_SQL in sync with FEATURE_NAMES and Weights::default() in index.rs.
 F = ["structural", "loose", "kinds", "literals", "api", "name", "callees", "stmt_exact", "stmt_shape",
      "stmt_lcs", "containment", "embed"]
 W_FN = np.array([0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0, 0, 0, 0, 0.26, 0])
 W_SQL = np.array([0, 0.46, 0, 0.17, 0.29, 0.02, 0.06, 0, 0, 0, 0, 0])
 
 
-def collect(root: pathlib.Path, tag: str):
+def collect(root: pathlib.Path, tag: str, bin_path: str):
     """(key, text) for fn-* units and sql files; keys match the eval-groups dump refs."""
     items = []
     for ds in sorted(p for p in root.glob("fn-*") if p.is_dir()):
         for g in sorted(p for p in ds.iterdir() if p.is_dir()):
-            out = subprocess.run([BIN, "units", str(g)], capture_output=True, text=True).stdout
+            out = subprocess.run([bin_path, "units", str(g)], capture_output=True, text=True).stdout
             for line in out.splitlines():
                 m = re.match(r"(.+?):(\d+)-(\d+) (\w+) (\S+) \((\d+) tokens\)", line)
                 if not m or int(m.group(6)) < 8:
@@ -83,11 +82,10 @@ if __name__ == "__main__":
     ap.add_argument("--out", required=True)
     ap.add_argument("--bin", default="duplicatecode")
     a = ap.parse_args()
-    BIN = a.bin
     cols = ["ds", "fa", "fb", "ga", "gb", "lmin", "lmax"] + F
     dumps = {"dev": pd.read_csv(a.dump_dev, sep="\t", header=None, names=cols),
              "hold": pd.read_csv(a.dump_hold, sep="\t", header=None, names=cols)}
-    items = collect(pathlib.Path(a.dev), "dev") + collect(pathlib.Path(a.hold), "hold")
+    items = collect(pathlib.Path(a.dev), "dev", a.bin) + collect(pathlib.Path(a.hold), "hold", a.bin)
     keys, texts = [k for k, _ in items], [t for _, t in items]
     print(f"{len(texts)} texts, mean {np.mean([len(t) for t in texts]):.0f} chars", flush=True)
     out = json.loads(pathlib.Path(a.out).read_text()) if pathlib.Path(a.out).exists() else {}
@@ -96,7 +94,7 @@ if __name__ == "__main__":
             continue
         try:
             t0 = time.time()
-            model = EmbeddingModel.from_pretrained_hf(mid)
+            model = embed_anything.EmbeddingModel.from_pretrained_hf(mid)
             load = time.time() - t0
             t0 = time.time()
             vecs = []

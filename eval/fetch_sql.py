@@ -153,8 +153,7 @@ def main() -> None:
             v = variants(r["sql"], r["sql_context"])
         except Exception:
             continue
-        distinct = {s for s in v.values()}
-        if len(distinct) < 4:
+        if len(set(v.values())) < 4:
             continue
         d = a.out / f"q{r['id']}"
         d.mkdir(parents=True, exist_ok=True)

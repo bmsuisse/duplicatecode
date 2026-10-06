@@ -168,7 +168,6 @@ fn is_pure_expr(node: Node, src: &[u8]) -> bool {
                         .all(|c| is_pure_expr(c, src))
                 })
         }
-        "interpolation" => false,
         _ => false,
     }
 }
@@ -207,76 +206,64 @@ fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
     let text = |n: Node| n.utf8_text(src).unwrap_or("").to_string();
     let field = |n: Node, f: &str| n.child_by_field_name(f).map(text);
     match (lang, node.kind()) {
-        (Lang::Python, "function_definition" | "class_definition") => {
-            field(node, "name").into_iter().collect()
-        }
+        (
+            _,
+            "function_definition"
+            | "class_definition"
+            | "function_declaration"
+            | "class_declaration",
+        ) => field(node, "name").into_iter().collect(),
         (Lang::Python, "decorated_definition") => node
             .child_by_field_name("definition")
             .map(|d| defined_names(d, lang, src))
             .unwrap_or_default(),
         // `MOD = 10**9 + 7` / `INF = float('inf')`: pure module-level constants nobody reads
-        (Lang::Python, "expression_statement") => {
-            let Some(a) = node.named_child(0).filter(|c| c.kind() == "assignment") else {
-                return Vec::new();
-            };
-            match (
-                a.child_by_field_name("left"),
-                a.child_by_field_name("right"),
-            ) {
-                (Some(l), Some(r)) if l.kind() == "identifier" && is_pure_expr(r, src) => {
-                    vec![text(l)]
-                }
-                _ => Vec::new(),
-            }
-        }
+        (Lang::Python, "expression_statement") => node
+            .named_child(0)
+            .filter(|c| c.kind() == "assignment")
+            .and_then(|a| {
+                let l = a.child_by_field_name("left")?;
+                let r = a.child_by_field_name("right")?;
+                (l.kind() == "identifier" && is_pure_expr(r, src)).then(|| vec![text(l)])
+            })
+            .unwrap_or_default(),
         (Lang::Python, "import_statement" | "import_from_statement") => {
-            let mut cur = node.walk();
-            let mut out = Vec::new();
-            for n in node.children_by_field_name("name", &mut cur) {
-                if n.kind() == "aliased_import" {
-                    out.extend(field(n, "alias"));
-                } else {
-                    out.push(text(n).split('.').next().unwrap_or("").to_string());
-                }
-            }
             if node
                 .children(&mut node.walk())
                 .any(|c| c.kind() == "wildcard_import")
             {
-                out.clear();
+                return Vec::new();
             }
-            out
-        }
-        (Lang::TypeScript | Lang::Tsx, "function_declaration" | "class_declaration") => {
-            field(node, "name").into_iter().collect()
+            let mut cur = node.walk();
+            node.children_by_field_name("name", &mut cur)
+                .flat_map(|n| {
+                    if n.kind() == "aliased_import" {
+                        field(n, "alias")
+                    } else {
+                        text(n).split('.').next().map(str::to_string)
+                    }
+                })
+                .collect()
         }
         (Lang::TypeScript | Lang::Tsx, "lexical_declaration") => {
             let mut cur = node.walk();
             let mut out = Vec::new();
             for d in node.named_children(&mut cur) {
-                let is_fn = d.child_by_field_name("value").is_some_and(|v| {
+                let removable = d.child_by_field_name("value").is_some_and(|v| {
                     matches!(v.kind(), "arrow_function" | "function_expression")
                         || is_pure_expr(v, src)
                 });
-                match (is_fn, field(d, "name")) {
+                match (removable, field(d, "name")) {
                     (true, Some(n)) => out.push(n),
                     _ => return Vec::new(), // top-level state/side effects stay
                 }
             }
             out
         }
-        (Lang::TypeScript | Lang::Tsx, "import_statement") => {
-            let mut out = Vec::new();
-            let mut stack = vec![node];
-            while let Some(n) = stack.pop() {
-                if n.kind() == "identifier" {
-                    out.push(text(n));
-                } else if n.kind() != "string" {
-                    stack.extend(n.named_children(&mut n.walk()));
-                }
-            }
-            out
-        }
+        (Lang::TypeScript | Lang::Tsx, "import_statement") => descendants(node)
+            .filter(|n| n.kind() == "identifier")
+            .map(text)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -303,6 +290,7 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
                         .is_some_and(|a| a.named_child_count() == 0)
             })
     };
+    let idents = identifier_leaves(root, src);
     for def in root.named_children(&mut root.walk()) {
         if def.kind() != "function_definition" {
             continue;
@@ -319,15 +307,7 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
             continue;
         }
         // all identifier uses of the name: the definition plus exactly one top-level call
-        let mut uses = 0;
-        let mut stack = vec![root];
-        while let Some(n) = stack.pop() {
-            if n.child_count() == 0 && n.kind() == "identifier" && text(n) == name {
-                uses += 1;
-            }
-            stack.extend(n.children(&mut n.walk()));
-        }
-        if uses != 2 {
+        if idents.iter().filter(|(t, _)| *t == name).count() != 2 {
             continue;
         }
         // the call, bare or as the only statement of a `__name__ == "__main__"` guard
@@ -339,13 +319,13 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
                 && st
                     .child_by_field_name("condition")
                     .is_some_and(|c| text(c).contains("__name__"))
+                && st
+                    .child_by_field_name("consequence")
+                    .filter(|b| b.named_child_count() == 1)
+                    .and_then(|b| b.named_child(0))
+                    .is_some_and(|c| is_bare_call(c, name))
             {
-                let cons = st.child_by_field_name("consequence");
-                if let Some(b) = cons.filter(|b| b.named_child_count() == 1) {
-                    if b.named_child(0).is_some_and(|c| is_bare_call(c, name)) {
-                        call_range = Some((st.start_byte(), st.end_byte()));
-                    }
-                }
+                call_range = Some((st.start_byte(), st.end_byte()));
             }
         }
         let Some((cs, ce)) = call_range else { continue };
@@ -381,14 +361,10 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
         };
         let src = cur.as_bytes();
         let root = tree.root_node();
-        // every identifier occurrence: (text, byte offset)
-        let mut idents: Vec<(&str, usize)> = Vec::new();
-        let mut stack = vec![root];
-        while let Some(n) = stack.pop() {
-            if n.child_count() == 0 && n.kind().ends_with("identifier") {
-                idents.push((n.utf8_text(src).unwrap_or(""), n.start_byte()));
-            }
-            stack.extend(n.children(&mut n.walk()));
+        // byte offsets of every identifier occurrence, by name
+        let mut occurrences: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+        for (t, at) in identifier_leaves(root, src) {
+            occurrences.entry(t).or_default().push(at);
         }
         let mut dead: Vec<(usize, usize)> = Vec::new();
         for c in root.named_children(&mut root.walk()) {
@@ -400,10 +376,11 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
             if names.is_empty() {
                 continue;
             }
+            let span = c.start_byte()..c.end_byte();
             let used = names.iter().any(|name| {
-                idents
-                    .iter()
-                    .any(|(t, at)| t == name && !(c.start_byte()..c.end_byte()).contains(at))
+                occurrences
+                    .get(name.as_str())
+                    .is_some_and(|at| at.iter().any(|a| !span.contains(a)))
             });
             if !used {
                 dead.push((c.start_byte(), c.end_byte()));
@@ -425,30 +402,51 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
     cur
 }
 
+/// Every node below (and including) `root`, in pre-order.
+fn descendants(root: Node) -> impl Iterator<Item = Node> {
+    let mut stack = vec![root];
+    std::iter::from_fn(move || {
+        let n = stack.pop()?;
+        let mut kids: Vec<_> = n.children(&mut n.walk()).collect();
+        kids.reverse();
+        stack.extend(kids);
+        Some(n)
+    })
+}
+
+/// Every identifier leaf below `root` as (text, byte offset).
+fn identifier_leaves<'a>(root: Node<'a>, src: &'a [u8]) -> Vec<(&'a str, usize)> {
+    descendants(root)
+        .filter(|n| n.child_count() == 0 && n.kind().ends_with("identifier"))
+        .map(|n| (n.utf8_text(src).unwrap_or(""), n.start_byte()))
+        .collect()
+}
+
 fn strip_quotes(t: &str) -> &str {
     t.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
 }
 
+/// Lower-cased, unquoted text of an SQL name node.
+fn sql_name(n: Node, src: &[u8]) -> String {
+    strip_quotes(n.utf8_text(src).unwrap_or("")).to_lowercase()
+}
+
 /// Alias and CTE names of a SQL file (lower-cased).
 fn sql_locals(lang: Lang, root: Node, src: &[u8]) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
     if lang != Lang::Sql {
-        return out;
+        return Default::default();
     }
-    let txt = |n: Node| strip_quotes(n.utf8_text(src).unwrap_or("")).to_lowercase();
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
-        if let Some(a) = n.child_by_field_name("alias") {
-            out.insert(txt(a));
-        }
-        if n.kind() == "cte" {
-            if let Some(id) = n.named_child(0).filter(|c| c.kind() == "identifier") {
-                out.insert(txt(id));
-            }
-        }
-        stack.extend(n.children(&mut n.walk()));
-    }
-    out
+    descendants(root)
+        .flat_map(|n| {
+            let alias = n.child_by_field_name("alias");
+            let cte = (n.kind() == "cte")
+                .then(|| n.named_child(0).filter(|c| c.kind() == "identifier"))
+                .flatten();
+            [alias, cte]
+        })
+        .flatten()
+        .map(|n| sql_name(n, src))
+        .collect()
 }
 
 struct Ctx<'a> {
@@ -463,19 +461,6 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn first_descendant<'t>(&self, node: Node<'t>, kind: &str) -> Option<Node<'t>> {
-        let mut stack = vec![node];
-        while let Some(n) = stack.pop() {
-            if n.kind() == kind {
-                return Some(n);
-            }
-            let mut kids: Vec<_> = n.children(&mut n.walk()).collect();
-            kids.reverse();
-            stack.extend(kids);
-        }
-        None
-    }
-
     fn text(&self, n: Node) -> String {
         n.utf8_text(self.src).unwrap_or("").to_string()
     }
@@ -525,15 +510,13 @@ impl Ctx<'_> {
         let field_name = |n: Node| n.child_by_field_name("name").map(|x| self.text(x));
         match (self.lang, node.kind()) {
             (Lang::Sql, "statement") => {
-                let name = self
-                    .first_descendant(node, "object_reference")
-                    .filter(|_| {
-                        node.named_child(0).is_some_and(|c| {
-                            c.kind().starts_with("create") || c.kind().starts_with("insert")
-                        })
-                    })
-                    .map(|o| strip_quotes(&self.text(o)).to_lowercase())
-                    .unwrap_or_else(|| "query".into());
+                // only DDL/DML statements are named after their target; checked first so queries
+                // skip the tree walk
+                let name = node
+                    .named_child(0)
+                    .filter(|c| c.kind().starts_with("create") || c.kind().starts_with("insert"))
+                    .and_then(|_| descendants(node).find(|n| n.kind() == "object_reference"))
+                    .map_or_else(|| "query".into(), |o| sql_name(o, self.src));
                 Some(("statement", name, node))
             }
             (Lang::Python, "function_definition") => Some(("function", field_name(node)?, node)),
@@ -645,7 +628,7 @@ impl Ctx<'_> {
             lines: (node.end_position().row - node.start_position().row + 1) as u32,
             name_vec: None,
             name_parts,
-            text: self.text(node).into(),
+            text: node.utf8_text(self.src).unwrap_or("").into(),
             vec: None,
         });
     }
@@ -708,12 +691,11 @@ impl Ctx<'_> {
         let kind = node.kind();
         TYPE_KINDS.contains(&kind)
             || (self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node))
-            || (!self.keep_output && self.is_debug(node))
-            || (self.keep_output && self.is_script_noise(node))
-    }
-
-    fn is_script_noise(&self, node: Node) -> bool {
-        is_script_noise(node, self.lang, self.src)
+            || if self.keep_output {
+                is_script_noise(node, self.lang, self.src)
+            } else {
+                self.is_debug(node)
+            }
     }
 
     fn is_debug(&self, node: Node) -> bool {
@@ -931,7 +913,7 @@ impl Ctx<'_> {
         }
         match kind {
             "identifier" => {
-                let low = strip_quotes(&self.text(node)).to_lowercase();
+                let low = sql_name(node, self.src);
                 let qualifier = node.parent().is_some_and(|p| {
                     p.kind() == "object_reference"
                         && p.parent().is_some_and(|g| g.kind() == "field")
@@ -960,35 +942,32 @@ impl Ctx<'_> {
 
     /// SQL features (callees, referenced tables/columns, literals); true = do not descend.
     fn sql_features(&self, node: Node, f: &mut Features) -> bool {
-        let name_of = |n: Node| strip_quotes(&self.text(n)).to_lowercase();
+        let name_of = |n: Node| sql_name(n, self.src);
+        // the referenced name of an invocation/relation: its leading object_reference
+        let target = || {
+            node.named_child(0)
+                .filter(|c| c.kind() == "object_reference")
+                .map(name_of)
+        };
         match node.kind() {
             "invocation" => {
-                if let Some(o) = node
-                    .named_child(0)
-                    .filter(|c| c.kind() == "object_reference")
-                {
-                    let n = name_of(o);
+                if let Some(n) = target() {
                     f.api.insert(n.clone());
                     f.callees.insert(n);
                 }
             }
             "relation" => {
-                if let Some(o) = node
-                    .named_child(0)
-                    .filter(|c| c.kind() == "object_reference")
-                {
-                    let n = name_of(o);
-                    if !self.local.contains(&n) {
-                        f.api.insert(n);
-                    }
+                if let Some(n) = target().filter(|n| !self.local.contains(n)) {
+                    f.api.insert(n);
                 }
             }
             "field" => {
-                if let Some(c) = node.child_by_field_name("name") {
-                    let n = name_of(c);
-                    if !self.local.contains(&n) {
-                        f.api.insert(n);
-                    }
+                if let Some(n) = node
+                    .child_by_field_name("name")
+                    .map(name_of)
+                    .filter(|n| !self.local.contains(n))
+                {
+                    f.api.insert(n);
                 }
             }
             "literal" => {

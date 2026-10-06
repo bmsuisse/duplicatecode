@@ -120,6 +120,7 @@ benchmarks sharing 24 cores, so read them as relative.
 | sentence-transformers/all-MiniLM-L6-v2 | 384 | 248 | 0.84 0.81 / 0.68 0.90 | 0.81 0.78 / 0.80 0.85 | **+0.083** |
 | Qwen/Qwen3-Embedding-0.6B | 1024 | 1168 | 0.83 0.80 / 0.72 0.90 | 0.80 0.77 / 0.82 0.85 | +0.081 |
 | BAAI/bge-small-en-v1.5 | 384 | 436 | 0.83 0.78 / 0.56 0.86 | 0.79 0.76 / 0.77 0.81 | +0.052 |
+| BAAI/bge-base-en-v1.5 | 768 | 698 | 0.80 0.79 / 0.56 0.86 | 0.77 0.76 / 0.79 0.78 | +0.042 |
 | jinaai/jina-embeddings-v2-base-en | 768 | 471 | 0.74 0.79 / 0.52 0.79 | 0.73 0.74 / 0.77 0.76 | +0.018 |
 | minishlab/potion-base-8M (static) | 256 | ~1 | 0.75 0.68 / 0.47 0.74 | 0.76 0.74 / 0.70 0.77 | +0.013 |
 

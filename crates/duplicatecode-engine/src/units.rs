@@ -855,7 +855,7 @@ impl Ctx<'_> {
                     if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
                         out.push("return".into());
                         self.norm_tokens(v, out, skip_blocks);
-                        if self.lang != Lang::Python {
+                        if self.lang == Lang::CSharp {
                             out.push(";".into());
                         }
                         i += 2;
@@ -865,6 +865,8 @@ impl Ctx<'_> {
                     i += 1;
                 }
             }
+            // statement terminators are optional in JS/TS (ASI): `a=1;` and `a=1` are the same code
+            ";" if matches!(self.lang, Lang::TypeScript | Lang::Tsx) => {}
             _ if node.child_count() == 0 => out.push(norm_leaf(kind).to_string()),
             _ => self.norm_children(node, out, skip_blocks),
         }
@@ -1041,7 +1043,7 @@ impl Ctx<'_> {
                 if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
                     let mut tokens = vec!["return".to_string()];
                     self.norm_tokens(v, &mut tokens, true);
-                    if self.lang != Lang::Python {
+                    if self.lang == Lang::CSharp {
                         tokens.push(";".into());
                     }
                     let mut shape = vec!["return_statement".to_string()];

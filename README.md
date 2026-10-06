@@ -32,6 +32,26 @@ duplicatecode scan . --pairs --json                  # machine-readable pairs in
 duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives <other repo>]
 ```
 
+## More ways to look
+
+```sh
+duplicatecode fragments packages/            # copied blocks inside different functions (4+ identical statements)
+duplicatecode scan . --pairs --explain       # say what differs: literals, calls, lines (what to parameterize)
+duplicatecode find "retry with exponential backoff" src/   # does something like this already exist? (needs embeddings)
+```
+
+- `fragments` indexes windows of consecutive normalized statements, so a block pasted into another
+  function is found even when the surrounding functions differ. On an injection benchmark (renamed
+  blocks of real functions pasted into others) it finds 93-97% of blocks of 6+ statements; see
+  `eval/REPORT.md`. Tune with `--min-stmts` / `--min-tokens`; constructors and dunders are ignored.
+- `--explain` adds, per pair, the literals and calls only one side has and the source lines with no
+  counterpart ("16 of 18/17 statements shared").
+- `find` embeds the query and every unit and ranks by similarity; with MiniLM it ranked the right
+  implementation first for 94% of 50 task descriptions (recall@3 = 100%).
+- Default thresholds depend on the profile: `copies` keeps its tuned 0.6 (`scan`), 0.4 (`diff`), 0.45
+  (`review`); `reimpl` scores live lower, so it defaults to 0.35 / 0.28 / 0.30, which correspond to roughly
+  0.1% / 1% false-positive rates on unrelated code in the benchmarks.
+
 ## Embeddings (bring your own key)
 
 Two optional signals, both off by default (the detector stays LLM-free unless you ask):

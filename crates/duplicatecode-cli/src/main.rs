@@ -103,7 +103,28 @@ enum Profile {
     Reimpl,
 }
 
+/// Score from which a pair is reported when `--threshold` is not given. `copies` keeps its tuned
+/// value; `reimpl` scores live lower (measured: ~0.25 at 1% and ~0.34 at 0.1% false-positive rate
+/// on unrelated code), so it gets values matching those rates instead of the copies cut-off.
+#[derive(Clone, Copy)]
+enum Command {
+    Diff,
+    Review,
+    Scan,
+}
+
 impl Profile {
+    fn default_threshold(self, command: Command) -> f64 {
+        match (self, command) {
+            (Profile::Copies, Command::Diff) => 0.4,
+            (Profile::Copies, Command::Review) => 0.45,
+            (Profile::Copies, Command::Scan) => 0.6,
+            (Profile::Reimpl, Command::Diff) => 0.28,
+            (Profile::Reimpl, Command::Review) => 0.3,
+            (Profile::Reimpl, Command::Scan) => 0.35,
+        }
+    }
+
     fn weights(self) -> Weights {
         match self {
             Profile::Copies => Weights::copies(),
@@ -136,8 +157,8 @@ enum Cmd {
         /// Diff file, or `-` for stdin.
         #[arg(long, default_value = "-")]
         diff: String,
-        #[arg(long, default_value_t = 0.4)]
-        threshold: f64,
+        #[arg(long)]
+        threshold: Option<f64>,
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
@@ -163,8 +184,8 @@ enum Cmd {
         #[arg(long)]
         exclude: Vec<String>,
         /// Lower = more candidates (recall), higher = fewer (precision).
-        #[arg(long, default_value_t = 0.45)]
-        threshold: f64,
+        #[arg(long)]
+        threshold: Option<f64>,
         #[arg(long, default_value_t = 0.3)]
         min_name: f64,
         #[arg(long, default_value_t = 6)]
@@ -251,8 +272,8 @@ enum Cmd {
         /// `.gitignore` is honoured automatically.
         #[arg(long)]
         exclude: Vec<String>,
-        #[arg(long, default_value_t = 0.6)]
-        threshold: f64,
+        #[arg(long)]
+        threshold: Option<f64>,
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
@@ -429,6 +450,7 @@ fn main() -> Result<()> {
             min_lines,
             json,
         } => {
+            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Diff));
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -500,6 +522,7 @@ fn main() -> Result<()> {
             preview_lines,
             profile,
         } => {
+            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Review));
             let mut units = Vec::new();
             let mut src = std::collections::HashMap::new();
             for p in &paths {
@@ -712,6 +735,7 @@ fn main() -> Result<()> {
             fail_on_found,
             json,
         } => {
+            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Scan));
             let mut units = Vec::new();
             for p in &paths {
                 for mut u in load_units_with(p, &exclude) {

@@ -8,6 +8,15 @@ use tree_sitter::{Node, Parser};
 
 pub const KGRAM: usize = 4;
 
+/// One normalized statement of a unit.
+#[derive(Clone, Copy, Debug)]
+pub struct FragStmt {
+    pub hash: u64,
+    pub tokens: u32,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Unit {
     pub file: String,
@@ -57,6 +66,9 @@ pub struct Unit {
     pub name_vec: Option<std::sync::Arc<[f32]>>,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
+    /// Normalized statements in source order (for fragment-level clone search).
+    #[serde(skip)]
+    pub frag: Vec<FragStmt>,
     /// Source text of the unit (embedded as a whole when code embeddings are enabled).
     #[serde(skip)]
     pub text: std::sync::Arc<str>,
@@ -593,6 +605,15 @@ impl Ctx<'_> {
         let fingerprint2 = kgram_hashes(&tokens, 2);
         let mut stmts = Vec::new();
         self.statements(node, &mut stmts);
+        let frag = stmts
+            .iter()
+            .map(|st| FragStmt {
+                hash: hash_of(&st.tokens),
+                tokens: st.tokens.len() as u32,
+                start: st.lines.0,
+                end: st.lines.1,
+            })
+            .collect();
         let mut stmts_exact = BTreeMap::new();
         let mut stmts_shape = BTreeMap::new();
         let mut shape_seq = Vec::new();
@@ -628,6 +649,7 @@ impl Ctx<'_> {
             lines: (node.end_position().row - node.start_position().row + 1) as u32,
             name_vec: None,
             name_parts,
+            frag,
             text: node.utf8_text(self.src).unwrap_or("").into(),
             vec: None,
         });
@@ -1067,6 +1089,13 @@ impl Ctx<'_> {
                 i += 1;
                 continue;
             }
+            let first = out.len();
+            let span = |a: Node, b: Node| {
+                (
+                    a.start_position().row as u32 + 1,
+                    b.end_position().row as u32 + 1,
+                )
+            };
             if blockish && c.is_named() {
                 if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
                     let mut tokens = vec!["return".to_string()];
@@ -1076,7 +1105,16 @@ impl Ctx<'_> {
                     }
                     let mut shape = vec!["return_statement".to_string()];
                     shape.extend(shape_of(v).into_iter().take(3));
-                    out.push(Stmt { tokens, shape });
+                    out.push(Stmt {
+                        lines: (0, 0),
+                        tokens,
+                        shape,
+                    });
+                    if let Some(next) = node.child(i + 1) {
+                        for st in &mut out[first..] {
+                            st.lines = span(c, next);
+                        }
+                    }
                     i += 2;
                     continue;
                 }
@@ -1084,6 +1122,7 @@ impl Ctx<'_> {
                     let mut tokens = Vec::new();
                     self.norm_tokens(c, &mut tokens, true);
                     out.push(Stmt {
+                        lines: (0, 0),
                         tokens,
                         shape: shape_of(c),
                     });
@@ -1098,9 +1137,15 @@ impl Ctx<'_> {
                 let mut tokens = Vec::new();
                 self.norm_tokens(c, &mut tokens, true);
                 out.push(Stmt {
+                    lines: (0, 0),
                     tokens,
                     shape: vec!["return".into(), shape_of(c).join(">")],
                 });
+            }
+            for st in &mut out[first..] {
+                if st.lines == (0, 0) {
+                    st.lines = span(c, c);
+                }
             }
             self.statements(c, out);
             i += 1;
@@ -1149,6 +1194,7 @@ impl Ctx<'_> {
         }
         tokens.extend(["=", "[", "]"].map(String::from));
         out.push(Stmt {
+            lines: (0, 0),
             tokens,
             shape: ["expression_statement", "assignment", "list"]
                 .map(String::from)
@@ -1183,12 +1229,17 @@ impl Ctx<'_> {
                 }
                 _ => continue,
             }
-            out.push(Stmt { tokens, shape });
+            out.push(Stmt {
+                lines: (0, 0),
+                tokens,
+                shape,
+            });
         }
         if let Some(body) = comp.child_by_field_name("body") {
             let mut tokens = Vec::new();
             self.append_stmt(comp.kind(), body, &mut tokens);
             out.push(Stmt {
+                lines: (0, 0),
                 tokens,
                 shape: ["expression_statement", "call", "attribute"]
                     .map(String::from)
@@ -1197,6 +1248,7 @@ impl Ctx<'_> {
         }
         if is_return {
             out.push(Stmt {
+                lines: (0, 0),
                 tokens: vec!["return".into(), "ID".into()],
                 shape: vec!["return_statement".into()],
             });
@@ -1314,6 +1366,8 @@ fn norm_leaf(kind: &str) -> &str {
 }
 
 struct Stmt {
+    /// 1-based inclusive source lines of the statement the entry was derived from.
+    lines: (u32, u32),
     tokens: Vec<String>,
     /// Coarse kind path, e.g. [expression_statement, assignment, call].
     shape: Vec<String>,

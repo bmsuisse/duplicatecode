@@ -216,6 +216,28 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Find copied blocks: runs of identical (normalized) statements shared by two different
+    /// functions, even when the rest of the functions differ.
+    Fragments {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Minimum number of consecutive identical statements.
+        #[arg(long, default_value_t = 4)]
+        min_stmts: usize,
+        /// Minimum normalized tokens in the shared run.
+        #[arg(long, default_value_t = 30)]
+        min_tokens: usize,
+        /// Ignore test code.
+        #[arg(long)]
+        skip_tests: bool,
+        /// Only report fragments between different files.
+        #[arg(long)]
+        cross_file: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print source lines of a unit: `show path/to/file.py:10-40`.
     Show { spec: String },
     /// Find similar unit pairs inside one repository (self-comparison).
@@ -574,6 +596,54 @@ fn main() -> Result<()> {
                 .take(b + 1 - a)
             {
                 println!("{:>5}| {l}", i + 1);
+            }
+        }
+        Cmd::Fragments {
+            paths,
+            exclude,
+            min_stmts,
+            min_tokens,
+            skip_tests,
+            cross_file,
+            json,
+        } => {
+            let mut units = Vec::new();
+            for p in &paths {
+                units.extend(load_units_with(p, &exclude));
+            }
+            units.retain(|u| !u.boilerplate && !(skip_tests && u.is_test));
+            let mut found = duplicatecode_engine::fragments::find_fragments(
+                &units,
+                duplicatecode_engine::fragments::FragmentOptions {
+                    min_stmts,
+                    min_tokens,
+                    ..Default::default()
+                },
+            );
+            if cross_file {
+                found.retain(|f| f.a.file != f.b.file);
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else {
+                for f in &found {
+                    println!(
+                        "{} stmts, {} tokens  {}:{}-{} ({}, {:.0}%)  <->  {}:{}-{} ({}, {:.0}%)",
+                        f.statements,
+                        f.tokens,
+                        f.a.file,
+                        f.a.start_line,
+                        f.a.end_line,
+                        f.a.unit,
+                        f.a.coverage * 100.0,
+                        f.b.file,
+                        f.b.start_line,
+                        f.b.end_line,
+                        f.b.unit,
+                        f.b.coverage * 100.0
+                    );
+                }
+                eprintln!("{} fragment pair(s)", found.len());
             }
         }
         Cmd::Find {

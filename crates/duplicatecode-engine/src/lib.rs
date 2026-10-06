@@ -3,6 +3,7 @@
 pub mod diff;
 pub mod embed;
 pub mod fingerprint;
+pub mod fragments;
 pub mod index;
 pub mod lang;
 pub mod mutate;

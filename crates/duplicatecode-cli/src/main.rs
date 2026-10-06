@@ -11,6 +11,56 @@ use duplicatecode_engine::{
 use std::io::Read;
 use std::path::PathBuf;
 
+/// Named embedding setups for `--embed`. Local presets talk to `eval/embed_server.py` (default
+/// http://127.0.0.1:8099/v1, override with DUPLICATECODE_EMBED_ENDPOINT), which loads the named model.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Preset {
+    /// all-MiniLM-L6-v2, local: fastest, tied for best quality in the bake-off
+    Minilm,
+    /// Qwen3-Embedding-0.6B, local: 8k-token context, slower
+    Qwen3,
+    /// potion-base-8M, local static model: ~1 ms per text
+    Potion,
+    /// OpenAI text-embedding-3-small (needs OPENAI_API_KEY)
+    Openai,
+    /// Cohere embed-v4.0 (needs COHERE_API_KEY)
+    Cohere,
+}
+
+impl Preset {
+    fn config(self, dims: Option<u32>) -> Result<duplicatecode_engine::embed::EmbedConfig> {
+        use duplicatecode_engine::embed::EmbedConfig;
+        let local = |model: &str| {
+            let endpoint = std::env::var("DUPLICATECODE_EMBED_ENDPOINT")
+                .unwrap_or_else(|_| "http://127.0.0.1:8099/v1".into());
+            // the local server returns full vectors whatever `dimensions` asks for
+            EmbedConfig::new(endpoint, model.into(), Some("local".into()), None, None)
+        };
+        let key = |name: &str| {
+            std::env::var(name).with_context(|| format!("this preset needs {name} to be set"))
+        };
+        Ok(match self {
+            Preset::Minilm => local("sentence-transformers/all-MiniLM-L6-v2"),
+            Preset::Qwen3 => local("Qwen/Qwen3-Embedding-0.6B"),
+            Preset::Potion => local("minishlab/potion-base-8M"),
+            Preset::Openai => EmbedConfig::new(
+                "https://api.openai.com/v1".into(),
+                "text-embedding-3-small".into(),
+                Some(key("OPENAI_API_KEY")?),
+                None,
+                dims,
+            ),
+            Preset::Cohere => EmbedConfig::new(
+                "https://api.cohere.com".into(),
+                "embed-v4.0".into(),
+                Some(key("COHERE_API_KEY")?),
+                None,
+                dims,
+            ),
+        })
+    }
+}
+
 /// Optional semantic name similarity (Azure AI Foundry / Azure OpenAI / OpenAI-compatible embeddings).
 /// Configure with OPENAI_API_KEY [+ OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL], COHERE_API_KEY [+ COHERE_EMBEDDING_MODEL], or AZURE_AI_FOUNDRY_ENDPOINT, AZURE_AI_FOUNDRY_API_KEY (or `az login`) and
 /// AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT. Vectors are cached in a flat file.
@@ -19,6 +69,9 @@ struct EmbedArgs {
     /// Embed unit names and use the cosine as an extra name-similarity signal.
     #[arg(long)]
     embeddings: bool,
+    /// Embed every unit with a named setup (implies --embed-code); see `--help` for the presets.
+    #[arg(long, value_enum)]
+    embed: Option<Preset>,
     /// Embed the full text of every unit (function, class, file, statement) and blend the cosine of
     /// the two vectors into the score. Finds re-implementations that share no tokens.
     #[arg(long)]
@@ -41,12 +94,25 @@ struct EmbedArgs {
 }
 
 impl EmbedArgs {
+    /// Whole-unit embeddings are on for `--embed-code` and for any `--embed <preset>`.
+    fn code_enabled(&self) -> bool {
+        self.embed_code || self.embed.is_some()
+    }
+
+    /// The embedding provider: the `--embed` preset, else whatever the environment configures.
+    fn config(&self) -> Result<duplicatecode_engine::embed::EmbedConfig> {
+        match self.embed {
+            Some(preset) => preset.config(Some(self.embed_dims)),
+            None => duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
+                .context("an embedding provider is needed: use --embed <preset> or set OPENAI_API_KEY, COHERE_API_KEY, AZURE_AI_FOUNDRY_ENDPOINT or DUPLICATECODE_EMBED_ENDPOINT"),
+        }
+    }
+
     fn apply(&self, units: &mut [duplicatecode_engine::Unit]) -> Result<()> {
-        if !self.embeddings && !self.embed_code {
+        if !self.embeddings && !self.code_enabled() {
             return Ok(());
         }
-        let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(self.embed_dims))
-            .context("--embeddings/--embed-code need OPENAI_API_KEY (optionally OPENAI_BASE_URL for compatible servers), COHERE_API_KEY or AZURE_AI_FOUNDRY_ENDPOINT / AZURE_OPENAI_ENDPOINT / DUPLICATECODE_EMBED_ENDPOINT")?;
+        let cfg = self.config()?;
         let path = self
             .embed_cache
             .clone()
@@ -69,7 +135,7 @@ impl EmbedArgs {
                     .map_err(anyhow::Error::msg)?,
             );
         }
-        if self.embed_code {
+        if self.code_enabled() {
             report(
                 "code embeddings",
                 duplicatecode_engine::embed::embed_unit_code(
@@ -89,7 +155,7 @@ impl EmbedArgs {
             name_floor: self.embed_floor,
             ..w
         };
-        if self.embed_code {
+        if self.code_enabled() {
             w.with_embed(self.embed_weight)
         } else {
             w
@@ -570,10 +636,7 @@ fn main() -> Result<()> {
             embed.weights(Weights::default()),
         )?,
         Cmd::EmbedTest { embed, names } => {
-            let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
-                .context(
-                    "set OPENAI_API_KEY (+ OPENAI_BASE_URL), or AZURE_AI_FOUNDRY_ENDPOINT (+ AZURE_AI_FOUNDRY_API_KEY or `az login`)",
-                )?;
+            let cfg = embed.config()?;
             let path = embed
                 .embed_cache
                 .clone()
@@ -688,8 +751,7 @@ fn main() -> Result<()> {
             }
             units.retain(|u| u.token_count() >= min_tokens && !u.boilerplate);
             embed.apply(&mut units)?;
-            let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
-                .context("no embedding provider configured")?;
+            let cfg = embed.config()?;
             let q = duplicatecode_engine::embed::embed_query(&cfg, &query)
                 .map_err(anyhow::Error::msg)?;
             let mut hits: Vec<(f64, &duplicatecode_engine::Unit)> = units

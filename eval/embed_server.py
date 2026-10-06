@@ -4,12 +4,13 @@
 # ///
 """Local OpenAI-compatible /v1/embeddings server around embed-anything (no API key needed).
 
-    uv run --no-project --python 3.12 eval/embed_server.py          # Qwen/Qwen3-Embedding-0.6B on :8099
-    export DUPLICATECODE_EMBED_ENDPOINT=http://127.0.0.1:8099/v1 DUPLICATECODE_EMBED_API_KEY=local
-    export DUPLICATECODE_EMBED_MODEL=qwen3-embedding-0.6b
-    duplicatecode scan . --embed-code
+    uv run --no-project --python 3.12 eval/embed_server.py          # on :8099
+    duplicatecode scan . --embed minilm
 
-Env: EMBED_MODEL (HF id), EMBED_PORT. The `dimensions` request field is ignored (full vectors).
+The server loads whichever Hugging Face model id the request names (`"model": ...`) the first time it is
+asked for it, so `duplicatecode scan . --embed minilm|qwen3|potion` works against one running server and
+cached vectors can never be mixed between models. Env: EMBED_MODEL (model for requests that name none),
+EMBED_PORT. The `dimensions` request field is ignored (full vectors).
 CPU only with the PyPI wheel; a CUDA build of embed-anything is needed to use the GPU.
 """
 import json
@@ -19,9 +20,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import embed_anything
 from embed_anything import EmbeddingModel
 
-MODEL_ID = os.environ.get("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+DEFAULT_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 PORT = int(os.environ.get("EMBED_PORT", "8099"))
-model = EmbeddingModel.from_pretrained_hf(MODEL_ID)
+_models: dict[str, EmbeddingModel] = {}
+
+
+def load(model_id: str) -> EmbeddingModel:
+    if model_id not in _models:
+        print(f"loading {model_id}", flush=True)
+        _models[model_id] = EmbeddingModel.from_pretrained_hf(model_id)
+    return _models[model_id]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -31,10 +39,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
         texts = body["input"] if isinstance(body["input"], list) else [body["input"]]
+        model_id = body.get("model") or DEFAULT_MODEL
+        try:
+            model = load(model_id)
+        except BaseException as e:  # the native loader panics on unsupported architectures
+            err = json.dumps({"error": f"cannot load {model_id}: {e}"[:300]}).encode()
+            self.send_response(400)
+            self.send_header("content-length", str(len(err)))
+            self.end_headers()
+            self.wfile.write(err)
+            return
         vecs = [r.embedding for r in embed_anything.embed_query(texts, model)]
         out = json.dumps({
             "object": "list",
-            "model": MODEL_ID,
+            "model": model_id,
             "data": [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vecs)],
         }).encode()
         self.send_response(200)
@@ -48,5 +66,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"serving {MODEL_ID} on http://127.0.0.1:{PORT}/v1", flush=True)
+    print(f"serving on http://127.0.0.1:{PORT}/v1 (default model {DEFAULT_MODEL})", flush=True)
     HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

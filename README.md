@@ -57,6 +57,8 @@ duplicatecode find "retry with exponential backoff" src/   # does something like
 Two optional signals, both off by default (the detector stays LLM-free unless you ask):
 
 - `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
+- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`) and implies
+  `--embed-code`. Model ids go into the cache key, so vectors of different models never mix.
 - `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
   the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
   re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from
@@ -76,8 +78,10 @@ export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_
 export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
 export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
 # Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-# Fully local, no key: `uv run --no-project --python 3.12 eval/embed_server.py`, then
-export DUPLICATECODE_EMBED_ENDPOINT=http://127.0.0.1:8099/v1 DUPLICATECODE_EMBED_API_KEY=local DUPLICATECODE_EMBED_MODEL=qwen3
+# Fully local, no key: start the server once (CPU; it loads whichever model a request names)
+#   uv run --no-project --python 3.12 eval/embed_server.py
+#   duplicatecode scan . --embed minilm          # or: qwen3, potion  (default endpoint 127.0.0.1:8099)
+# Hosted presets: --embed openai (OPENAI_API_KEY), --embed cohere (COHERE_API_KEY)
 
 duplicatecode embed-test fetchUser getUser     # check credentials
 duplicatecode scan . --embed-code              # whole-unit embeddings

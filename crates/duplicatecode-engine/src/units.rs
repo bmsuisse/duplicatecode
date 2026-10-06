@@ -97,6 +97,8 @@ struct Features {
 pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let mut parser = Parser::new();
     parser.set_language(&lang.ts_language()).ok()?;
+    let pruned = prune_dead_toplevel(&mut parser, lang, source);
+    let source = pruned.as_str();
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
     let mut ctx = Ctx {
@@ -109,6 +111,121 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let stem = stem.split('.').next().unwrap_or(stem).to_string();
     ctx.emit("file", stem, tree.root_node());
     units.pop()
+}
+
+/// Names a top-level statement introduces (function/class names, import bindings); empty when the
+/// statement must be kept (executable code, wildcard imports, ...).
+fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
+    let text = |n: Node| n.utf8_text(src).unwrap_or("").to_string();
+    let field = |n: Node, f: &str| n.child_by_field_name(f).map(text);
+    match (lang, node.kind()) {
+        (Lang::Python, "function_definition" | "class_definition") => {
+            field(node, "name").into_iter().collect()
+        }
+        (Lang::Python, "decorated_definition") => node
+            .child_by_field_name("definition")
+            .map(|d| defined_names(d, lang, src))
+            .unwrap_or_default(),
+        (Lang::Python, "import_statement" | "import_from_statement") => {
+            let mut cur = node.walk();
+            let mut out = Vec::new();
+            for n in node.children_by_field_name("name", &mut cur) {
+                if n.kind() == "aliased_import" {
+                    out.extend(field(n, "alias"));
+                } else {
+                    out.push(text(n).split('.').next().unwrap_or("").to_string());
+                }
+            }
+            if node
+                .children(&mut node.walk())
+                .any(|c| c.kind() == "wildcard_import")
+            {
+                out.clear();
+            }
+            out
+        }
+        (Lang::TypeScript | Lang::Tsx, "function_declaration" | "class_declaration") => {
+            field(node, "name").into_iter().collect()
+        }
+        (Lang::TypeScript | Lang::Tsx, "lexical_declaration") => {
+            let mut cur = node.walk();
+            let mut out = Vec::new();
+            for d in node.named_children(&mut cur) {
+                let is_fn = d
+                    .child_by_field_name("value")
+                    .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"));
+                match (is_fn, field(d, "name")) {
+                    (true, Some(n)) => out.push(n),
+                    _ => return Vec::new(), // top-level state/side effects stay
+                }
+            }
+            out
+        }
+        (Lang::TypeScript | Lang::Tsx, "import_statement") => {
+            let mut out = Vec::new();
+            let mut stack = vec![node];
+            while let Some(n) = stack.pop() {
+                if n.kind() == "identifier" {
+                    out.push(text(n));
+                } else if n.kind() != "string" {
+                    stack.extend(n.named_children(&mut n.walk()));
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Blank out top-level functions, classes and imports that nothing else in the file references
+/// (competitive-programming templates, unused helpers), repeating until nothing more is dead, so
+/// that whole-file comparison looks at the code that actually runs. Line structure is kept.
+fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String {
+    let mut cur = source.to_string();
+    for _ in 0..4 {
+        let Some(tree) = parser.parse(&cur, None) else {
+            break;
+        };
+        let src = cur.as_bytes();
+        let root = tree.root_node();
+        // every identifier occurrence: (text, byte offset)
+        let mut idents: Vec<(&str, usize)> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            if n.child_count() == 0 && n.kind().ends_with("identifier") {
+                idents.push((n.utf8_text(src).unwrap_or(""), n.start_byte()));
+            }
+            stack.extend(n.children(&mut n.walk()));
+        }
+        let mut dead: Vec<(usize, usize)> = Vec::new();
+        for c in root.named_children(&mut root.walk()) {
+            let names = defined_names(c, lang, src);
+            if names.is_empty() {
+                continue;
+            }
+            let used = names.iter().any(|name| {
+                idents
+                    .iter()
+                    .any(|(t, at)| t == name && !(c.start_byte()..c.end_byte()).contains(at))
+            });
+            if !used {
+                dead.push((c.start_byte(), c.end_byte()));
+            }
+        }
+        if dead.is_empty() {
+            break;
+        }
+        let mut bytes = cur.into_bytes();
+        for (a, b) in dead {
+            for x in &mut bytes[a..b] {
+                if *x != b'\n' {
+                    *x = b' ';
+                }
+            }
+        }
+        cur = String::from_utf8(bytes).unwrap_or_default();
+    }
+    cur
 }
 
 struct Ctx<'a> {
@@ -959,6 +1076,26 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_unit_ignores_unused_helpers_and_imports() {
+        let core = "def main():\n    s = input()\n    print(s[::-1])\n\nmain()\n";
+        let noisy = format!(
+            "import math\nfrom heapq import heappush\n\ndef gcd(a, b):\n    return a if not b else gcd(b, a % b)\n\n\
+             def lcm(a, b):\n    return a * b // gcd(a, b)\n\n{core}"
+        );
+        let a = extract_file_unit("a.py", Lang::Python, core).unwrap();
+        let b = extract_file_unit("b.py", Lang::Python, &noisy).unwrap();
+        assert_eq!(a.tokens, b.tokens);
+        // helpers that are used stay
+        let used = "def f(x):\n    return x + 1\n\nprint(f(2))\n";
+        let u = extract_file_unit("c.py", Lang::Python, used).unwrap();
+        assert!(u.tokens.len() > 8);
+        let js = "import fs from 'fs';\nconst unused = () => 1;\nconsole.log(2);\n";
+        let j = extract_file_unit("a.js", Lang::TypeScript, js).unwrap();
+        let j2 = extract_file_unit("b.js", Lang::TypeScript, "console.log(2);\n").unwrap();
+        assert_eq!(j.tokens, j2.tokens);
+    }
+
     use super::*;
 
     #[test]

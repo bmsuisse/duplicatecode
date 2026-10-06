@@ -80,6 +80,9 @@ pub struct Weights {
     pub sql: Option<[f64; N_FEATURES]>,
     /// Replacement weights for whole-file units (scripts): their names carry no information.
     pub file: Option<[f64; N_FEATURES]>,
+    /// Leave out literals/api/callees when neither side has any and spread their weight over the
+    /// rest, so structurally identical code without literals is not penalized.
+    pub renormalize: bool,
 }
 
 impl Weights {
@@ -109,6 +112,7 @@ impl Default for Weights {
             bias: 0.0,
             w: [0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26],
             name_floor: 0.5,
+            renormalize: true,
             file: Some([0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0]),
             sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0]),
         }
@@ -125,6 +129,7 @@ impl Weights {
             bias: 0.0,
             w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0],
             name_floor: 0.5,
+            renormalize: false,
             file: None,
             sql: None,
         }
@@ -222,9 +227,15 @@ pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) 
     // and spread their weight over the features that do apply.
     let n = |x: &std::collections::BTreeSet<String>| x.is_empty();
     let skip = [
-        (FEAT_LITERALS, n(&a.literals) && n(&b.literals)),
-        (FEAT_API, n(&a.api) && n(&b.api)),
-        (FEAT_CALLEES, n(&a.callees) && n(&b.callees)),
+        (
+            FEAT_LITERALS,
+            weights.renormalize && n(&a.literals) && n(&b.literals),
+        ),
+        (FEAT_API, weights.renormalize && n(&a.api) && n(&b.api)),
+        (
+            FEAT_CALLEES,
+            weights.renormalize && n(&a.callees) && n(&b.callees),
+        ),
     ];
     let total: f64 = weights.w.iter().sum();
     let skipped: f64 = skip.iter().filter(|x| x.1).map(|x| weights.w[x.0]).sum();
@@ -415,7 +426,11 @@ impl Corpus {
         // features absent on both sides are renormalized away, which can raise a score by at most
         // `scale_max`; bound with it so the prefilter stays exact
         let total: f64 = w.w.iter().sum();
-        let skippable = w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES];
+        let skippable = if w.renormalize {
+            w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES]
+        } else {
+            0.0
+        };
         let scale_max = if total - skippable > 1e-9 {
             total / (total - skippable)
         } else {

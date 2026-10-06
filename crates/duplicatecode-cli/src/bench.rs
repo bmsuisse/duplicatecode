@@ -391,6 +391,7 @@ fn fit(samples: &[&Sample]) -> Weights {
         w: [0.0; N_FEATURES],
         sql: None,
         file: None,
+        renormalize: false,
         name_floor: 0.5,
     };
     for _ in 0..2500 {

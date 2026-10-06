@@ -204,9 +204,7 @@ fn is_script_noise(node: Node, lang: Lang, src: &[u8]) -> bool {
                 e.child_by_field_name("right"),
             );
             l.is_some_and(|l| l.kind() == "identifier")
-                && r.is_some_and(|r| {
-                    r.kind() == "attribute" && !text(r).contains(|c| c == '(' || c == '[')
-                })
+                && r.is_some_and(|r| r.kind() == "attribute" && !text(r).contains(['(', '[']))
         }
         _ => false,
     }
@@ -325,9 +323,7 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
         // the call, bare or as the only statement of a `__name__ == "__main__"` guard
         let mut call_range = None;
         for st in root.named_children(&mut root.walk()) {
-            if is_bare_call(st, name) {
-                call_range = Some((st.start_byte(), st.end_byte()));
-            } else if st.kind() == "if_statement"
+            let guarded = st.kind() == "if_statement"
                 && st
                     .child_by_field_name("condition")
                     .is_some_and(|c| text(c).contains("__name__"))
@@ -335,8 +331,8 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
                     .child_by_field_name("consequence")
                     .filter(|b| b.named_child_count() == 1)
                     .and_then(|b| b.named_child(0))
-                    .is_some_and(|c| is_bare_call(c, name))
-            {
+                    .is_some_and(|c| is_bare_call(c, name));
+            if is_bare_call(st, name) || guarded {
                 call_range = Some((st.start_byte(), st.end_byte()));
             }
         }

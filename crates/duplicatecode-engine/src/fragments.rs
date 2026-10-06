@@ -138,7 +138,7 @@ pub fn find_fragments(units: &[Unit], opts: FragmentOptions) -> Vec<Fragment> {
             });
         }
     }
-    out.sort_by(|x, y| y.tokens.cmp(&x.tokens));
+    out.sort_by_key(|f| std::cmp::Reverse(f.tokens));
     out
 }
 

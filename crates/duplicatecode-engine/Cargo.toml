@@ -3,7 +3,7 @@ name = "duplicatecode-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Static duplicate/similar code detection engine for Python, TypeScript and C#"
+description = "Static duplicate/similar code detection engine for Python, TypeScript/JavaScript, SQL and C#"
 
 [dependencies]
 ignore = "0.4.33"

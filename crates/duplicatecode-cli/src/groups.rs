@@ -3,6 +3,7 @@
 //! Layout `<root>/<dataset>/<group>/<file>`. Every file is one whole-file unit; all pairs inside a
 //! dataset are scored. Reports AUC, recall at fixed false-positive rates and top-1 retrieval.
 
+use crate::bench::tpr_at_fpr;
 use anyhow::{bail, Result};
 use duplicatecode_engine::index::{score_with_idf, Idf, Scores, Weights};
 use duplicatecode_engine::{load_file_units, load_units, Unit};
@@ -41,19 +42,6 @@ fn auc(scores: &[(f64, bool)]) -> f64 {
         return f64::NAN;
     }
     (rank_sum - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos * n_neg) as f64
-}
-
-/// Fraction of positives scoring strictly above the (1 - fpr) quantile of the negatives.
-fn tpr_at_fpr(scores: &[(f64, bool)], fpr: f64) -> f64 {
-    let mut neg: Vec<f64> = scores.iter().filter(|s| !s.1).map(|s| s.0).collect();
-    let pos: Vec<f64> = scores.iter().filter(|s| s.1).map(|s| s.0).collect();
-    if neg.is_empty() || pos.is_empty() {
-        return f64::NAN;
-    }
-    neg.sort_by(|a, b| a.total_cmp(b));
-    let idx = (((1.0 - fpr) * neg.len() as f64).ceil() as usize).clamp(1, neg.len()) - 1;
-    let thr = neg[idx];
-    pos.iter().filter(|p| **p > thr).count() as f64 / pos.len() as f64
 }
 
 fn group_of(u: &Unit) -> &str {
@@ -103,7 +91,7 @@ pub fn run(
     prepare: &dyn Fn(&mut [Unit]) -> Result<()>,
     weights: Weights,
 ) -> Result<()> {
-    let mut dump_out = dump.map(|p| std::fs::File::create(p)).transpose()?;
+    let mut dump_out = dump.map(std::fs::File::create).transpose()?;
     let mut datasets: Vec<_> = std::fs::read_dir(root)?
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -149,7 +137,7 @@ pub fn run(
                     if units[i].file == units[j].file {
                         continue;
                     }
-                    let mut feats: Vec<String> = all[i][j]
+                    let feats: Vec<String> = all[i][j]
                         .features()
                         .iter()
                         .map(|x| format!("{x:.5}"))
@@ -216,9 +204,6 @@ pub fn make_mutation_groups(
         .filter(|p| {
             let s = p.to_string_lossy();
             s.ends_with(".tsx")
-                && !s.contains("node_modules")
-                && !s.contains("/.worktrees/")
-                && !s.contains("/.claude/")
                 && !s.contains(".test.")
                 && !s.contains(".stories.")
                 && !s.contains("/generated/")
@@ -240,7 +225,6 @@ pub fn make_mutation_groups(
     for i in (1..files.len()).rev() {
         files.swap(i, (next() % (i as u64 + 1)) as usize);
     }
-    let mut written = 0;
     for (k, p) in files.iter().skip(skip).take(n).enumerate() {
         let text = std::fs::read_to_string(p)?;
         let dir = out.join(format!("c{:03}", skip + k));
@@ -255,8 +239,11 @@ pub fn make_mutation_groups(
                 std::fs::write(dir.join(format!("{}.tsx", m.name().replace(' ', "_"))), v)?;
             }
         }
-        written += 1;
     }
-    println!("wrote {written} component groups to {}", out.display());
+    println!(
+        "wrote {} component groups to {}",
+        files.len().saturating_sub(skip).min(n),
+        out.display()
+    );
     Ok(())
 }

@@ -418,7 +418,7 @@ fn apply(w: &Weights, x: &[f64; N_FEATURES]) -> f64 {
 }
 
 /// Fraction of positives scoring above the (1 - fpr) quantile of the negatives.
-fn tpr_at_fpr(scores: &[(f64, bool)], fpr: f64) -> f64 {
+pub(crate) fn tpr_at_fpr(scores: &[(f64, bool)], fpr: f64) -> f64 {
     let mut neg: Vec<f64> = scores.iter().filter(|s| !s.1).map(|s| s.0).collect();
     let pos: Vec<f64> = scores.iter().filter(|s| s.1).map(|s| s.0).collect();
     if neg.is_empty() || pos.is_empty() {

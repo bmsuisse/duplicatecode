@@ -52,33 +52,33 @@ impl EmbedArgs {
             .clone()
             .unwrap_or_else(duplicatecode_engine::embed::EmbeddingCache::default_path);
         let mut cache = duplicatecode_engine::embed::EmbeddingCache::load(&path);
-        if self.embeddings {
-            let st = duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache)
-                .map_err(anyhow::Error::msg)?;
+        let report = |what: &str, st: duplicatecode_engine::embed::EmbedStats| {
             eprintln!(
-                "embeddings: {} distinct names ({} cached, {} fetched) via {} [{}]",
+                "{what}: {} distinct ({} cached, {} fetched) via {} [{}]",
                 st.distinct_names,
                 st.from_cache,
                 st.fetched,
                 cfg.model_id(),
                 path.display()
             );
+        };
+        if self.embeddings {
+            report(
+                "name embeddings",
+                duplicatecode_engine::embed::embed_unit_names(units, &cfg, &mut cache)
+                    .map_err(anyhow::Error::msg)?,
+            );
         }
         if self.embed_code {
-            let st = duplicatecode_engine::embed::embed_unit_code(
-                units,
-                &cfg,
-                &mut cache,
-                self.embed_max_chars,
-            )
-            .map_err(anyhow::Error::msg)?;
-            eprintln!(
-                "code embeddings: {} distinct units ({} cached, {} fetched) via {} [{}]",
-                st.distinct_names,
-                st.from_cache,
-                st.fetched,
-                cfg.model_id(),
-                path.display()
+            report(
+                "code embeddings",
+                duplicatecode_engine::embed::embed_unit_code(
+                    units,
+                    &cfg,
+                    &mut cache,
+                    self.embed_max_chars,
+                )
+                .map_err(anyhow::Error::msg)?,
             );
         }
         Ok(())

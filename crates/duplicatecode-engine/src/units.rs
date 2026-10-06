@@ -117,6 +117,55 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     units.pop()
 }
 
+/// Expression without side effects: literals, names, operators over them, containers of them and
+/// calls to a few pure builtins (`float('inf')`).
+fn is_pure_expr(node: Node, src: &[u8]) -> bool {
+    const PURE_CALLS: &[&str] = &[
+        "int", "float", "str", "bool", "list", "set", "dict", "tuple", "range",
+    ];
+    match node.kind() {
+        "integer"
+        | "float"
+        | "string"
+        | "true"
+        | "false"
+        | "none"
+        | "null"
+        | "number"
+        | "template_string"
+        | "identifier"
+        | "unary_operator"
+        | "binary_operator"
+        | "unary_expression"
+        | "binary_expression"
+        | "parenthesized_expression"
+        | "tuple"
+        | "list"
+        | "dictionary"
+        | "set"
+        | "pair"
+        | "array"
+        | "object"
+        | "string_content"
+        | "string_start"
+        | "string_end"
+        | "escape_sequence" => node
+            .named_children(&mut node.walk())
+            .all(|c| is_pure_expr(c, src)),
+        "call" => {
+            let f = node.child_by_field_name("function");
+            let name = f.and_then(|f| f.utf8_text(src).ok()).unwrap_or("");
+            PURE_CALLS.contains(&name)
+                && node.child_by_field_name("arguments").is_none_or(|a| {
+                    a.named_children(&mut a.walk())
+                        .all(|c| is_pure_expr(c, src))
+                })
+        }
+        "interpolation" => false,
+        _ => false,
+    }
+}
+
 /// Names a top-level statement introduces (function/class names, import bindings); empty when the
 /// statement must be kept (executable code, wildcard imports, ...).
 fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
@@ -130,6 +179,21 @@ fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
             .child_by_field_name("definition")
             .map(|d| defined_names(d, lang, src))
             .unwrap_or_default(),
+        // `MOD = 10**9 + 7` / `INF = float('inf')`: pure module-level constants nobody reads
+        (Lang::Python, "expression_statement") => {
+            let Some(a) = node.named_child(0).filter(|c| c.kind() == "assignment") else {
+                return Vec::new();
+            };
+            match (
+                a.child_by_field_name("left"),
+                a.child_by_field_name("right"),
+            ) {
+                (Some(l), Some(r)) if l.kind() == "identifier" && is_pure_expr(r, src) => {
+                    vec![text(l)]
+                }
+                _ => Vec::new(),
+            }
+        }
         (Lang::Python, "import_statement" | "import_from_statement") => {
             let mut cur = node.walk();
             let mut out = Vec::new();
@@ -155,9 +219,10 @@ fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
             let mut cur = node.walk();
             let mut out = Vec::new();
             for d in node.named_children(&mut cur) {
-                let is_fn = d
-                    .child_by_field_name("value")
-                    .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"));
+                let is_fn = d.child_by_field_name("value").is_some_and(|v| {
+                    matches!(v.kind(), "arrow_function" | "function_expression")
+                        || is_pure_expr(v, src)
+                });
                 match (is_fn, field(d, "name")) {
                     (true, Some(n)) => out.push(n),
                     _ => return Vec::new(), // top-level state/side effects stay

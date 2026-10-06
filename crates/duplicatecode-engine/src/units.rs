@@ -167,6 +167,34 @@ fn is_pure_expr(node: Node, src: &[u8]) -> bool {
     }
 }
 
+/// Whole-file Python scripts: `sys.setrecursionlimit(..)` and rebinding aliases such as
+/// `input = sys.stdin.readline` say nothing about the algorithm.
+fn is_script_noise(node: Node, lang: Lang, src: &[u8]) -> bool {
+    let text = |n: Node| n.utf8_text(src).unwrap_or("");
+    if lang != Lang::Python || node.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(e) = node.named_child(0) else {
+        return false;
+    };
+    match e.kind() {
+        "call" => e
+            .child_by_field_name("function")
+            .is_some_and(|f| text(f) == "sys.setrecursionlimit"),
+        "assignment" => {
+            let (l, r) = (
+                e.child_by_field_name("left"),
+                e.child_by_field_name("right"),
+            );
+            l.is_some_and(|l| l.kind() == "identifier")
+                && r.is_some_and(|r| {
+                    r.kind() == "attribute" && !text(r).contains(|c| c == '(' || c == '[')
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Names a top-level statement introduces (function/class names, import bindings); empty when the
 /// statement must be kept (executable code, wildcard imports, ...).
 fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
@@ -358,6 +386,10 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
         }
         let mut dead: Vec<(usize, usize)> = Vec::new();
         for c in root.named_children(&mut root.walk()) {
+            if is_script_noise(c, lang, src) {
+                dead.push((c.start_byte(), c.end_byte()));
+                continue;
+            }
             let names = defined_names(c, lang, src);
             if names.is_empty() {
                 continue;
@@ -672,31 +704,8 @@ impl Ctx<'_> {
             || (self.keep_output && self.is_script_noise(node))
     }
 
-    /// Whole-file Python scripts: `sys.setrecursionlimit(..)` and rebinding aliases such as
-    /// `input = sys.stdin.readline` say nothing about the algorithm.
     fn is_script_noise(&self, node: Node) -> bool {
-        if self.lang != Lang::Python || node.kind() != "expression_statement" {
-            return false;
-        }
-        let Some(e) = node.named_child(0) else {
-            return false;
-        };
-        match e.kind() {
-            "call" => e
-                .child_by_field_name("function")
-                .is_some_and(|f| self.text(f) == "sys.setrecursionlimit"),
-            "assignment" => {
-                let (l, r) = (
-                    e.child_by_field_name("left"),
-                    e.child_by_field_name("right"),
-                );
-                l.is_some_and(|l| l.kind() == "identifier")
-                    && r.is_some_and(|r| {
-                        r.kind() == "attribute" && !self.text(r).contains(|c| c == '(' || c == '[')
-                    })
-            }
-            _ => false,
-        }
+        is_script_noise(node, self.lang, self.src)
     }
 
     fn is_debug(&self, node: Node) -> bool {

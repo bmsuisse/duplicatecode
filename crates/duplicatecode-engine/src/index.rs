@@ -73,18 +73,26 @@ pub struct Weights {
     /// Replacement weights for SQL, whose clones are best told apart by loose n-grams, referenced
     /// tables/columns and literals rather than by exact 4-gram structure.
     pub sql: Option<[f64; N_FEATURES]>,
+    /// Replacement weights for whole-file units (scripts): their names carry no information.
+    pub file: Option<[f64; N_FEATURES]>,
 }
 
 impl Weights {
-    /// The weights to use when comparing units of `lang`.
-    pub fn for_lang(&self, lang: crate::lang::Lang) -> Weights {
-        match (lang, self.sql) {
-            (crate::lang::Lang::Sql, Some(w)) => Weights {
+    /// The weights to use when comparing units like `u`.
+    pub fn for_unit(&self, u: &Unit) -> Weights {
+        let over = match (u.lang, u.kind.as_str()) {
+            (crate::lang::Lang::Sql, _) => self.sql,
+            (_, "file") => self.file,
+            _ => None,
+        };
+        match over {
+            Some(w) => Weights {
                 w,
                 sql: None,
+                file: None,
                 ..*self
             },
-            _ => *self,
+            None => *self,
         }
     }
 }
@@ -94,8 +102,9 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0],
+            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
             name_floor: 0.5,
+            file: Some([0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0]),
             sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0]),
         }
     }
@@ -111,6 +120,7 @@ impl Weights {
             bias: 0.0,
             w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
             name_floor: 0.5,
+            file: None,
             sql: None,
         }
     }
@@ -173,7 +183,7 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
 }
 
 pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
-    let resolved = weights.for_lang(a.lang);
+    let resolved = weights.for_unit(a);
     let weights = &resolved;
     let (structural, loose) = match idf {
         Some(i) => (
@@ -371,7 +381,7 @@ impl Corpus {
             }
             return out;
         }
-        let (threshold, w) = (opts.threshold, &opts.weights.for_lang(q.lang));
+        let (threshold, w) = (opts.threshold, &opts.weights.for_unit(q));
         if w.w[0] <= 0.0 {
             // no exact-4-gram term to bound the score by: every same-family unit is a candidate
             return (0..self.units.len() as u32)

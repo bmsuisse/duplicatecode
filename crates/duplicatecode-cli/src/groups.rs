@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Result};
 use duplicatecode_engine::index::{score_with_idf, Idf, Scores, Weights};
-use duplicatecode_engine::{load_file_units, Unit};
+use duplicatecode_engine::{load_file_units, load_units, Unit};
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -74,7 +74,7 @@ fn evaluate(units: &[Unit], pick: Pick, all: &[Vec<Scores>]) -> Report {
     for i in 0..n {
         let mut best: Option<(f64, bool)> = None;
         for j in 0..n {
-            if i == j {
+            if i == j || units[i].file == units[j].file {
                 continue;
             }
             let v = pick(&all[i][j]);
@@ -113,8 +113,17 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
     let mut headline = Vec::new();
     for dir in datasets {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        let mut units = load_file_units(&dir);
-        units.sort_by(|a, b| a.file.cmp(&b.file));
+        // `fn-*` datasets compare functions/classes (product path); the others whole files
+        let functions = name.starts_with("fn-");
+        let mut units = if functions {
+            load_units(&dir)
+                .into_iter()
+                .filter(|u| !u.boilerplate && u.token_count() >= 8)
+                .collect()
+        } else {
+            load_file_units(&dir)
+        };
+        units.sort_by(|a, b| (&a.file, a.start_line).cmp(&(&b.file, b.start_line)));
         let n = units.len();
         let idf = Idf::from_units(&units);
         let weights = Weights::default();
@@ -131,6 +140,9 @@ pub fn run(root: &Path, quiet: bool, dump: Option<&Path>) -> Result<()> {
             use std::io::Write;
             for i in 0..n {
                 for j in i + 1..n {
+                    if units[i].file == units[j].file {
+                        continue;
+                    }
                     let mut feats: Vec<String> = all[i][j]
                         .features()
                         .iter()

@@ -669,6 +669,34 @@ impl Ctx<'_> {
         TYPE_KINDS.contains(&kind)
             || (self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node))
             || (!self.keep_output && self.is_debug(node))
+            || (self.keep_output && self.is_script_noise(node))
+    }
+
+    /// Whole-file Python scripts: `sys.setrecursionlimit(..)` and rebinding aliases such as
+    /// `input = sys.stdin.readline` say nothing about the algorithm.
+    fn is_script_noise(&self, node: Node) -> bool {
+        if self.lang != Lang::Python || node.kind() != "expression_statement" {
+            return false;
+        }
+        let Some(e) = node.named_child(0) else {
+            return false;
+        };
+        match e.kind() {
+            "call" => e
+                .child_by_field_name("function")
+                .is_some_and(|f| self.text(f) == "sys.setrecursionlimit"),
+            "assignment" => {
+                let (l, r) = (
+                    e.child_by_field_name("left"),
+                    e.child_by_field_name("right"),
+                );
+                l.is_some_and(|l| l.kind() == "identifier")
+                    && r.is_some_and(|r| {
+                        r.kind() == "attribute" && !self.text(r).contains(|c| c == '(' || c == '[')
+                    })
+            }
+            _ => false,
+        }
     }
 
     fn is_debug(&self, node: Node) -> bool {
@@ -1384,6 +1412,14 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn python_script_noise_is_ignored_in_file_units() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let plain = f("n = int(input())\nprint(n)\n");
+        let noisy = f("import sys\nsys.setrecursionlimit(10**6)\ninput = sys.stdin.readline\nn = int(input())\nprint(n)\n");
+        assert_eq!(plain, noisy);
+    }
+
     #[test]
     fn python_main_wrapper_equals_top_level_code() {
         let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;

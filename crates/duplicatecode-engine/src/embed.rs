@@ -455,6 +455,14 @@ pub fn embed_unit_names(
     Ok(stats)
 }
 
+/// Unit-length embedding of one free-text query (for searching units by description).
+pub fn embed_query(cfg: &EmbedConfig, text: &str) -> Result<Vec<f32>, String> {
+    let mut rows = cfg.embed_batch(&[text.to_string()])?;
+    rows.pop()
+        .map(normalize)
+        .ok_or_else(|| "empty embedding response".into())
+}
+
 /// Cache key of a unit text: FNV-1a (stable across Rust releases, unlike `DefaultHasher`) plus the
 /// length, so a toolchain upgrade does not invalidate stored vectors.
 fn code_key(text: &str) -> String {

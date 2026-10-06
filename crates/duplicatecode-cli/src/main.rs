@@ -195,6 +195,27 @@ enum Cmd {
         #[arg(required = true, num_args = 2..)]
         names: Vec<String>,
     },
+    /// Search existing code by description: "does something like this already exist?". Embeds the
+    /// query and every unit below the paths and lists the closest units.
+    Find {
+        /// What the code should do, in plain language.
+        query: String,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[command(flatten)]
+        embed: EmbedArgs,
+        /// Number of results.
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+        /// Glob to skip (gitignore syntax, repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Ignore units with fewer tokens than this.
+        #[arg(long, default_value_t = 8)]
+        min_tokens: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print source lines of a unit: `show path/to/file.py:10-40`.
     Show { spec: String },
     /// Find similar unit pairs inside one repository (self-comparison).
@@ -553,6 +574,53 @@ fn main() -> Result<()> {
                 .take(b + 1 - a)
             {
                 println!("{:>5}| {l}", i + 1);
+            }
+        }
+        Cmd::Find {
+            query,
+            paths,
+            mut embed,
+            top,
+            exclude,
+            min_tokens,
+            json,
+        } => {
+            embed.embed_code = true; // searching by description needs unit embeddings
+            let mut units = Vec::new();
+            for p in &paths {
+                units.extend(load_units_with(p, &exclude));
+            }
+            units.retain(|u| u.token_count() >= min_tokens && !u.boilerplate);
+            embed.apply(&mut units)?;
+            let cfg = duplicatecode_engine::embed::EmbedConfig::from_env(Some(embed.embed_dims))
+                .context("no embedding provider configured")?;
+            let q = duplicatecode_engine::embed::embed_query(&cfg, &query)
+                .map_err(anyhow::Error::msg)?;
+            let mut hits: Vec<(f64, &duplicatecode_engine::Unit)> = units
+                .iter()
+                .filter_map(|u| {
+                    let v = u.vec.as_ref()?;
+                    Some((duplicatecode_engine::similarity::dot(&q, v)?, u))
+                })
+                .collect();
+            hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+            hits.truncate(top);
+            if json {
+                let rows: Vec<_> = hits
+                    .iter()
+                    .map(|(s, u)| {
+                        serde_json::json!({"score": s, "file": u.file, "name": u.name,
+                            "kind": u.kind, "start_line": u.start_line, "end_line": u.end_line})
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for (s, u) in hits {
+                    println!(
+                        "{s:.3}  {}:{}-{}  {} {}",
+                        u.file, u.start_line, u.end_line, u.kind, u.name
+                    );
+                }
             }
         }
         Cmd::Scan {

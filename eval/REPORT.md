@@ -122,6 +122,7 @@ benchmarks sharing 24 cores, so read them as relative.
 | BAAI/bge-small-en-v1.5 | 384 | 436 | 0.83 0.78 / 0.56 0.86 | 0.79 0.76 / 0.77 0.81 | +0.052 |
 | BAAI/bge-base-en-v1.5 | 768 | 698 | 0.80 0.79 / 0.56 0.86 | 0.77 0.76 / 0.79 0.78 | +0.042 |
 | jinaai/jina-embeddings-v2-base-en | 768 | 471 | 0.74 0.79 / 0.52 0.79 | 0.73 0.74 / 0.77 0.76 | +0.018 |
+| jinaai/jina-embeddings-v2-small-en | 512 | 42 | 0.78 0.74 / 0.54 0.82 | 0.74 0.73 / 0.80 0.76 | +0.027 |
 | minishlab/potion-base-8M (static) | 256 | ~1 | 0.75 0.68 / 0.47 0.74 | 0.76 0.74 / 0.70 0.77 | +0.013 |
 
 SQL is saturated (about 1.0 for every model), so it does not discriminate. Models that `embed-anything`

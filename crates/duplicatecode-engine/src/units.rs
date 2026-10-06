@@ -75,6 +75,7 @@ pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     };
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        local: sql_locals(lang, tree.root_node(), source.as_bytes()),
         keep_output: false,
         file,
         lang,
@@ -103,6 +104,7 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        local: sql_locals(lang, tree.root_node(), source.as_bytes()),
         keep_output: true,
         file,
         lang,
@@ -230,7 +232,35 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
     cur
 }
 
+fn strip_quotes(t: &str) -> &str {
+    t.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
+}
+
+/// Alias and CTE names of a SQL file (lower-cased).
+fn sql_locals(lang: Lang, root: Node, src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    if lang != Lang::Sql {
+        return out;
+    }
+    let txt = |n: Node| strip_quotes(n.utf8_text(src).unwrap_or("")).to_lowercase();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let Some(a) = n.child_by_field_name("alias") {
+            out.insert(txt(a));
+        }
+        if n.kind() == "cte" {
+            if let Some(id) = n.named_child(0).filter(|c| c.kind() == "identifier") {
+                out.insert(txt(id));
+            }
+        }
+        stack.extend(n.children(&mut n.walk()));
+    }
+    out
+}
+
 struct Ctx<'a> {
+    /// SQL: lower-cased alias and CTE names; they are abstracted like local variables.
+    local: std::collections::HashSet<String>,
     /// Whole-file (script) mode: print/console output is the program's result, not debug noise.
     keep_output: bool,
     file: &'a str,
@@ -240,6 +270,19 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    fn first_descendant<'t>(&self, node: Node<'t>, kind: &str) -> Option<Node<'t>> {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if n.kind() == kind {
+                return Some(n);
+            }
+            let mut kids: Vec<_> = n.children(&mut n.walk()).collect();
+            kids.reverse();
+            stack.extend(kids);
+        }
+        None
+    }
+
     fn text(&self, n: Node) -> String {
         n.utf8_text(self.src).unwrap_or("").to_string()
     }
@@ -288,6 +331,18 @@ impl Ctx<'_> {
     fn classify<'t>(&self, node: Node<'t>) -> Option<(&'static str, String, Node<'t>)> {
         let field_name = |n: Node| n.child_by_field_name("name").map(|x| self.text(x));
         match (self.lang, node.kind()) {
+            (Lang::Sql, "statement") => {
+                let name = self
+                    .first_descendant(node, "object_reference")
+                    .filter(|_| {
+                        node.named_child(0).is_some_and(|c| {
+                            c.kind().starts_with("create") || c.kind().starts_with("insert")
+                        })
+                    })
+                    .map(|o| strip_quotes(&self.text(o)).to_lowercase())
+                    .unwrap_or_else(|| "query".into());
+                Some(("statement", name, node))
+            }
             (Lang::Python, "function_definition") => Some(("function", field_name(node)?, node)),
             (Lang::Python, "class_definition") => Some(("class", field_name(node)?, node)),
             (_, "function_declaration" | "generator_function_declaration") => {
@@ -583,6 +638,7 @@ impl Ctx<'_> {
             return;
         }
         match kind {
+            _ if self.lang == Lang::Sql && node.child_count() == 0 => self.sql_leaf(node, out),
             "string"
             | "template_string"
             | "string_literal"
@@ -659,6 +715,89 @@ impl Ctx<'_> {
         }
     }
 
+    /// SQL leaves: keywords lower-cased, aliases/CTE names/qualifiers abstracted, and table,
+    /// column and function names kept (in SQL they are the semantics).
+    fn sql_leaf(&self, node: Node, out: &mut Vec<String>) {
+        let kind = node.kind();
+        if let Some(k) = kind.strip_prefix("keyword_") {
+            out.push(k.to_string());
+            return;
+        }
+        match kind {
+            "identifier" => {
+                let low = strip_quotes(&self.text(node)).to_lowercase();
+                let qualifier = node.parent().is_some_and(|p| {
+                    p.kind() == "object_reference"
+                        && p.parent().is_some_and(|g| g.kind() == "field")
+                });
+                if qualifier || self.local.contains(&low) {
+                    out.push("ID".into());
+                } else {
+                    out.push(low);
+                }
+            }
+            "literal" => {
+                let t = self.text(node);
+                let first = t.chars().next().unwrap_or(' ');
+                if first.is_ascii_digit() || first == '-' || first == '.' {
+                    out.push("NUM".into());
+                } else if first == '\'' || first == '"' {
+                    out.push("STR".into());
+                } else {
+                    out.push(t.to_lowercase());
+                }
+            }
+            ";" => {} // statement terminators carry no meaning
+            _ => out.push(norm_leaf(kind).to_string()),
+        }
+    }
+
+    /// SQL features (callees, referenced tables/columns, literals); true = do not descend.
+    fn sql_features(&self, node: Node, f: &mut Features) -> bool {
+        let name_of = |n: Node| strip_quotes(&self.text(n)).to_lowercase();
+        match node.kind() {
+            "invocation" => {
+                if let Some(o) = node
+                    .named_child(0)
+                    .filter(|c| c.kind() == "object_reference")
+                {
+                    let n = name_of(o);
+                    f.api.insert(n.clone());
+                    f.callees.insert(n);
+                }
+            }
+            "relation" => {
+                if let Some(o) = node
+                    .named_child(0)
+                    .filter(|c| c.kind() == "object_reference")
+                {
+                    let n = name_of(o);
+                    if !self.local.contains(&n) {
+                        f.api.insert(n);
+                    }
+                }
+            }
+            "field" => {
+                if let Some(c) = node.child_by_field_name("name") {
+                    let n = name_of(c);
+                    if !self.local.contains(&n) {
+                        f.api.insert(n);
+                    }
+                }
+            }
+            "literal" => {
+                let t = self.text(node);
+                let t = strip_quotes(&t);
+                if !t.is_empty() && t.len() <= 24 && !matches!(t, "0" | "1" | "2" | "-1") {
+                    f.literals.insert(t.to_lowercase());
+                }
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn norm_children(&self, node: Node, out: &mut Vec<String>, skip_blocks: bool) {
         for i in 0..node.child_count() {
             if let Some(c) = node.child(i) {
@@ -733,7 +872,8 @@ impl Ctx<'_> {
         let blockish = matches!(
             node.kind(),
             "block" | "statement_block" | "module" | "program" | "compilation_unit"
-        );
+        ) || (self.lang == Lang::Sql
+            && matches!(node.kind(), "statement" | "select" | "from" | "cte"));
         let n = node.child_count();
         let mut i = 0;
         while i < n {
@@ -884,6 +1024,9 @@ impl Ctx<'_> {
     fn collect_features(&self, node: Node, f: &mut Features) {
         let kind = node.kind();
         if self.is_ignored(node) {
+            return;
+        }
+        if self.lang == Lang::Sql && self.sql_features(node, f) {
             return;
         }
         match kind {
@@ -1080,6 +1223,23 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sql_ignores_case_aliases_and_formatting_but_not_tables() {
+        let f = |src: &str| extract_file_unit("q.sql", Lang::Sql, src).unwrap().tokens;
+        let a = f("SELECT o.id, SUM(i.amt) AS total FROM orders o JOIN items i ON o.id = i.oid WHERE o.status = 'x' GROUP BY o.id;");
+        let b = f("select\n  a.id,\n  sum(b.amt) as t\nfrom orders a\njoin items b on a.id = b.oid\nwhere a.status = 'y'\ngroup by a.id");
+        assert_eq!(a, b);
+        let c = f("SELECT o.id, SUM(i.amt) AS total FROM invoices o JOIN items i ON o.id = i.oid WHERE o.status = 'x' GROUP BY o.id;");
+        assert_ne!(a, c);
+        let u = extract_units(
+            "q.sql",
+            Lang::Sql,
+            "SELECT 1 FROM t;\nCREATE VIEW v AS SELECT a FROM t;",
+        );
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[1].name, "v");
+    }
+
     #[test]
     fn file_unit_ignores_unused_helpers_and_imports() {
         let core = "def main():\n    s = input()\n    print(s[::-1])\n\nmain()\n";

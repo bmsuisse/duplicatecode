@@ -80,7 +80,38 @@ signals do not carry.
 
 ## Embeddings
 
-EMBEDDING_SECTION
+Whole-unit embeddings (Qwen3-Embedding-0.6B via `embed-anything`, CPU, first 3000 chars of each unit),
+cosine similarity of the two units, measured on the same pairs as the static score (dev data only; the
+blend weight lambda was chosen on half of the groups and tested on the other half):
+
+| dataset | static score | cosine alone | blend (lambda) | held-out half: static -> blend |
+| --- | --- | --- | --- | --- |
+| fn-python (LLM re-implementations, function level) | 0.700 | **0.831** | 0.50: 0.831 | 0.699 -> **0.891** |
+| fn-typescript (same) | **0.802** | 0.724 | 0.20: 0.828 | 0.612 -> 0.673 |
+| python (CodeNet, whole files) | 0.689 | 0.979 | 0.50: 0.976 | 0.717 -> 0.975 |
+| javascript (CodeNet, whole files) | 0.503 | 0.957 | 0.50: 0.932 | 0.497 -> 0.966 |
+
+How much to trust it:
+
+- **The CodeNet rows are inflated and should not be quoted.** Cosine alone reaches 0.98 / 0.96, far above
+  anything structural. Explicit problem ids or URLs in comments explain only about 4% of the files
+  (21/480 Python, 5/480 JS), so the likely cause is training-set contamination (CodeNet is a standard
+  code-model corpus). I did not run a comment-stripped re-embedding.
+- **The fn-* rows are the clean test**: the LLM implementations were written for this repo, so the model
+  cannot have seen them. Python improves a lot (held-out half 0.70 -> 0.89); TypeScript only a little
+  (0.61 -> 0.67) and cosine alone is worse than the static score there.
+- Embeddings see docstrings and comments, which state the intent. That is legitimate for finding
+  re-implementations, but it is not a pure code-structure signal, and the static detector deliberately ignores
+  them.
+- Only dev data was embedded, there are 12-13 tasks per language, and lambda is a single parameter, so the
+  direction is reliable but the exact gain is not.
+- Cost: about 2.5 s per file on 24 CPU cores for a 0.6B model, i.e. roughly 40 minutes for 960 files; a
+  GPU or a hosted endpoint is needed for real repositories. Vectors are cacheable per unit text.
+
+Recommendation: add unit-level embeddings as an **optional** signal behind a flag (blend about 0.3-0.5 for
+Python), keep the static path as the default, and re-measure on a larger uncontaminated function-level set
+before choosing a default lambda.
+
 
 ## What could still be optimized
 

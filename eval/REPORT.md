@@ -153,6 +153,21 @@ before choosing a default lambda.
 
 ## Additions after the first report
 
+### Find by description (`duplicatecode find`, `eval/eval_find.py`)
+
+Queries are the 50 loose task descriptions; the corpus is the strict implementations of both models
+(168 units, 2 per task). A hit is a unit of a file that implements that task.
+
+| corpus | model | R@1 | R@3 | R@10 | MRR |
+| --- | --- | --- | --- | --- | --- |
+| 168 units | all-MiniLM-L6-v2 | 0.94 | 1.00 | 1.00 | 0.970 |
+| 168 units | Qwen3-Embedding-0.6B | 0.96 | 1.00 | 1.00 | 0.977 |
+| + 1,379 real units (Fabricks.Runtime) | all-MiniLM-L6-v2 | 0.82 | 0.96 | 1.00 | 0.893 |
+
+Caveats: the queries were written for these tasks and the units contain docstrings, so this measures
+"find the function I just described", not arbitrary code search; the distractors are from one repo.
+The Qwen3 run with distractors was still in progress when this was written.
+
 ### Fragment-level clones (`duplicatecode fragments`)
 
 Benchmark (`eval/make_fragment_data.py`, `eval/eval_fragments.py`): a renamed block of N consecutive

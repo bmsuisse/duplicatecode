@@ -389,6 +389,7 @@ fn fit(samples: &[&Sample]) -> Weights {
     let mut w = Weights {
         bias: 0.0,
         w: [0.0; N_FEATURES],
+        sql: None,
         name_floor: 0.5,
     };
     for _ in 0..2500 {

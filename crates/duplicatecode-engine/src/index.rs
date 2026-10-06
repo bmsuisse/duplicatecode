@@ -70,6 +70,23 @@ pub struct Weights {
     pub w: [f64; N_FEATURES],
     /// Embedding cosine at/below which two names count as unrelated (scaled to 0 at the floor, 1 at 1.0).
     pub name_floor: f64,
+    /// Replacement weights for SQL, whose clones are best told apart by loose n-grams, referenced
+    /// tables/columns and literals rather than by exact 4-gram structure.
+    pub sql: Option<[f64; N_FEATURES]>,
+}
+
+impl Weights {
+    /// The weights to use when comparing units of `lang`.
+    pub fn for_lang(&self, lang: crate::lang::Lang) -> Weights {
+        match (lang, self.sql) {
+            (crate::lang::Lang::Sql, Some(w)) => Weights {
+                w,
+                sql: None,
+                ..*self
+            },
+            _ => *self,
+        }
+    }
 }
 
 impl Default for Weights {
@@ -79,6 +96,7 @@ impl Default for Weights {
             bias: 0.0,
             w: [0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0],
             name_floor: 0.5,
+            sql: Some([0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0]),
         }
     }
 }
@@ -93,6 +111,7 @@ impl Weights {
             bias: 0.0,
             w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
             name_floor: 0.5,
+            sql: None,
         }
     }
 }
@@ -154,6 +173,8 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
 }
 
 pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
+    let resolved = weights.for_lang(a.lang);
+    let weights = &resolved;
     let (structural, loose) = match idf {
         Some(i) => (
             weighted_jaccard(&a.fingerprint, &b.fingerprint, |g| {
@@ -350,7 +371,13 @@ impl Corpus {
             }
             return out;
         }
-        let (threshold, w) = (opts.threshold, &opts.weights);
+        let (threshold, w) = (opts.threshold, &opts.weights.for_lang(q.lang));
+        if w.w[0] <= 0.0 {
+            // no exact-4-gram term to bound the score by: every same-family unit is a candidate
+            return (0..self.units.len() as u32)
+                .filter(|i| self.units[*i as usize].lang.family() == q.lang.family())
+                .collect();
+        }
         let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
         let min_jaccard = if w.w[0] > 0.0 {
             ((threshold - rest) / w.w[0]).max(0.0)

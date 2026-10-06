@@ -2,6 +2,7 @@
 
 pub mod diff;
 pub mod embed;
+pub mod explain;
 pub mod fingerprint;
 pub mod fragments;
 pub mod index;

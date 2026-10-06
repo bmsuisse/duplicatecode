@@ -274,6 +274,9 @@ enum Cmd {
         /// List individual pairs instead of grouping them into duplicate groups.
         #[arg(long = "pairs")]
         pairs_out: bool,
+        /// With --pairs: say what differs (literals, calls, lines) so the shared part can be extracted.
+        #[arg(long)]
+        explain: bool,
         /// Exit with status 1 when anything is found (for CI).
         #[arg(long)]
         fail_on_found: bool,
@@ -705,6 +708,7 @@ fn main() -> Result<()> {
             skip_tests,
             cross_file,
             pairs_out,
+            explain,
             fail_on_found,
             json,
         } => {
@@ -745,9 +749,27 @@ fn main() -> Result<()> {
                 .collect();
             pairs.sort_by(|a, b| b.scores.combined.total_cmp(&a.scores.combined));
             let groups = group_pairs(&pairs);
+            let by_place: std::collections::HashMap<String, &duplicatecode_engine::Unit> = units
+                .iter()
+                .map(|u| (format!("{}:{}", u.file, u.start_line), u))
+                .collect();
+            let explanation = |m: &duplicatecode_engine::Match| {
+                let a = by_place.get(&format!("{}:{}", m.query.file, m.query.start_line))?;
+                let b =
+                    by_place.get(&format!("{}:{}", m.candidate.file, m.candidate.start_line))?;
+                Some(duplicatecode_engine::explain::explain(a, b))
+            };
             if pairs_out {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&pairs)?);
+                    if explain {
+                        let rows: Vec<_> = pairs
+                            .iter()
+                            .map(|m| serde_json::json!({"match": m, "explanation": explanation(m)}))
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&pairs)?);
+                    }
                 } else {
                     println!(
                         "{} units scanned, {} similar pairs (>= {threshold})",
@@ -767,6 +789,12 @@ fn main() -> Result<()> {
                             m.candidate.end_line,
                             m.candidate.name
                         );
+                        if let Some(e) = explain.then(|| explanation(m)).flatten() {
+                            let text = e.summary();
+                            if !text.is_empty() {
+                                println!("      differs: {text}");
+                            }
+                        }
                     }
                 }
             } else if json {

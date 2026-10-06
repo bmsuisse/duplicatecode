@@ -10,6 +10,16 @@ pub fn jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
     inter as f64 / union as f64
 }
 
+/// Dot product of two equal-length vectors (cosine for unit-length ones); `None` on a length mismatch.
+pub fn dot(x: &[f32], y: &[f32]) -> Option<f64> {
+    (x.len() == y.len()).then(|| {
+        x.iter()
+            .zip(y)
+            .map(|(p, q)| (*p as f64) * (*q as f64))
+            .sum()
+    })
+}
+
 /// Weighted Jaccard: sum of weights of A ∩ B over sum of weights of A ∪ B.
 pub fn weighted_jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>, w: impl Fn(&T) -> f64) -> f64 {
     let (mut inter, mut union) = (0.0, 0.0);

@@ -1,6 +1,8 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice, weighted_jaccard};
+use crate::similarity::{
+    containment, cosine, dot, jaccard, lcs_ratio, multiset_dice, weighted_jaccard,
+};
 use crate::units::Unit;
 use std::collections::HashMap;
 
@@ -108,6 +110,16 @@ impl Weights {
         }
     }
 
+    /// Factor by which the remaining weights are scaled when `skipped` weight is left out.
+    pub fn renorm_scale(&self, skipped: f64) -> f64 {
+        let total: f64 = self.w.iter().sum();
+        if total - skipped > 1e-9 {
+            total / (total - skipped)
+        } else {
+            1.0
+        }
+    }
+
     /// The weights to use when comparing units like `u`.
     pub fn for_unit(&self, u: &Unit) -> Weights {
         let over = match (u.lang, u.kind.as_str()) {
@@ -115,15 +127,12 @@ impl Weights {
             (_, "file") => self.file,
             _ => None,
         };
-        match over {
-            Some(w) => Weights {
-                w,
-                sql: None,
-                file: None,
-                ..*self
-            },
-            None => *self,
-        }
+        over.map_or(*self, |w| Weights {
+            w,
+            sql: None,
+            file: None,
+            ..*self
+        })
     }
 }
 
@@ -206,14 +215,10 @@ impl Idf {
 fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
     let lexical = jaccard(&a.name_parts, &b.name_parts);
     match (&a.name_vec, &b.name_vec) {
-        (Some(x), Some(y)) if x.len() == y.len() => {
-            let cos: f64 = x
-                .iter()
-                .zip(y.iter())
-                .map(|(p, q)| (*p as f64) * (*q as f64))
-                .sum();
-            lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0))
-        }
+        (Some(x), Some(y)) => match dot(x, y) {
+            Some(cos) => lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0)),
+            None => lexical,
+        },
         _ => lexical,
     }
 }
@@ -223,25 +228,13 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
 }
 
 pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
-    let resolved = weights.for_unit(a);
-    let weights = &resolved;
-    let (structural, loose) = match idf {
-        Some(i) => (
-            weighted_jaccard(&a.fingerprint, &b.fingerprint, |g| {
-                i.fp.get(g).copied().unwrap_or(1.0)
-            }),
-            weighted_jaccard(&a.fingerprint2, &b.fingerprint2, |g| {
-                i.fp2.get(g).copied().unwrap_or(1.0)
-            }),
-        ),
-        None => (
-            jaccard(&a.fingerprint, &b.fingerprint),
-            jaccard(&a.fingerprint2, &b.fingerprint2),
-        ),
+    let weights = &weights.for_unit(a);
+    let idf_weight = |table: fn(&Idf) -> &HashMap<u64, f64>| {
+        move |g: &u64| idf.and_then(|i| table(i).get(g)).copied().unwrap_or(1.0)
     };
     let mut s = Scores {
-        structural,
-        loose,
+        structural: weighted_jaccard(&a.fingerprint, &b.fingerprint, idf_weight(|i| &i.fp)),
+        loose: weighted_jaccard(&a.fingerprint2, &b.fingerprint2, idf_weight(|i| &i.fp2)),
         containment: containment(&a.fingerprint, &b.fingerprint),
         kinds: cosine(&a.kinds, &b.kinds),
         literals: jaccard(&a.literals, &b.literals),
@@ -252,45 +245,29 @@ pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) 
         stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
         stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
         embed: match (&a.vec, &b.vec) {
-            (Some(x), Some(y)) if x.len() == y.len() => x
-                .iter()
-                .zip(y.iter())
-                .map(|(p, q)| (*p as f64) * (*q as f64))
-                .sum::<f64>()
-                .clamp(0.0, 1.0),
+            (Some(x), Some(y)) => dot(x, y).unwrap_or(0.0).clamp(0.0, 1.0),
             _ => 0.0,
         },
         combined: 0.0,
     };
-    // Features that neither side has (no literals, no calls, ...) say nothing: leave them out
-    // and spread their weight over the features that do apply.
-    let n = |x: &std::collections::BTreeSet<String>| x.is_empty();
-    let skip = [
-        (
-            FEAT_LITERALS,
-            weights.renormalize && n(&a.literals) && n(&b.literals),
-        ),
-        (FEAT_API, weights.renormalize && n(&a.api) && n(&b.api)),
-        (
-            FEAT_CALLEES,
-            weights.renormalize && n(&a.callees) && n(&b.callees),
-        ),
-    ];
-    let total: f64 = weights.w.iter().sum();
-    let skipped: f64 = skip.iter().filter(|x| x.1).map(|x| weights.w[x.0]).sum();
-    let scale = if total - skipped > 1e-9 {
-        total / (total - skipped)
-    } else {
-        1.0
-    };
-    let feats = s.features();
-    let sum: f64 = feats
-        .iter()
-        .zip(weights.w)
-        .enumerate()
-        .filter(|(i, _)| !skip.iter().any(|x| x.1 && x.0 == *i))
-        .map(|(_, (f, w))| f * w)
-        .sum();
+    // Features that neither side has (no literals, no calls, no vector) say nothing: leave them
+    // out and spread their weight over the features that do apply.
+    let mut w = weights.w;
+    if weights.renormalize {
+        let empty = |x: &std::collections::BTreeSet<String>| x.is_empty();
+        for (feature, absent) in [
+            (FEAT_LITERALS, empty(&a.literals) && empty(&b.literals)),
+            (FEAT_API, empty(&a.api) && empty(&b.api)),
+            (FEAT_CALLEES, empty(&a.callees) && empty(&b.callees)),
+            (FEAT_EMBED, a.vec.is_none() || b.vec.is_none()),
+        ] {
+            if absent {
+                w[feature] = 0.0;
+            }
+        }
+    }
+    let scale = weights.renorm_scale(weights.w.iter().sum::<f64>() - w.iter().sum::<f64>());
+    let sum: f64 = s.features().iter().zip(w).map(|(f, w)| f * w).sum();
     s.combined = weights.bias + scale * sum;
     s
 }
@@ -463,23 +440,13 @@ impl Corpus {
         }
         let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
         // features absent on both sides are renormalized away, which can raise a score by at most
-        // `scale_max`; bound with it so the prefilter stays exact
-        let total: f64 = w.w.iter().sum();
+        // `renorm_scale`; bound with it so the prefilter stays exact
         let skippable = if w.renormalize {
             w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES] + w.w[FEAT_EMBED]
         } else {
             0.0
         };
-        let scale_max = if total - skippable > 1e-9 {
-            total / (total - skippable)
-        } else {
-            1.0
-        };
-        let min_jaccard = if w.w[0] > 0.0 {
-            ((threshold / scale_max - rest) / w.w[0]).max(0.0)
-        } else {
-            0.0
-        };
+        let min_jaccard = ((threshold / w.renorm_scale(skippable) - rest) / w.w[0]).max(0.0);
         let min_shared = ((min_jaccard * q.fingerprint.len() as f64).ceil() as u32).max(1);
         let mut counts: std::collections::HashMap<u32, u32> = Default::default();
         for h in &q.fingerprint {

@@ -369,6 +369,8 @@ pub struct EmbeddingCache {
     /// Bytes of the file that parsed cleanly; anything after is cut off before the next append so
     /// that new records are never written behind an unreadable tail.
     valid_len: u64,
+    /// Size of the file when it was last read or written by this process.
+    file_len: u64,
 }
 
 impl EmbeddingCache {
@@ -383,7 +385,9 @@ impl EmbeddingCache {
     pub fn load(path: &Path) -> EmbeddingCache {
         let mut map = HashMap::new();
         let mut valid_len = 0u64;
+        let mut file_len = 0u64;
         if let Ok(bytes) = std::fs::read(path) {
+            file_len = bytes.len() as u64;
             let mut i = 0usize;
             let rd = |i: &mut usize, n: usize| -> Option<&[u8]> {
                 let s = bytes.get(*i..*i + n)?;
@@ -420,6 +424,7 @@ impl EmbeddingCache {
             map,
             pending: Vec::new(),
             valid_len,
+            file_len,
         }
     }
 
@@ -446,10 +451,18 @@ impl EmbeddingCache {
         if let Some(dir) = self.path.parent() {
             create_private_dir(dir)?;
         }
-        let mut f = open_private_append(&self.path)?;
-        if f.metadata()?.len() > self.valid_len {
-            f.set_len(self.valid_len)?;
+        // Cut a corrupt tail, but only if nobody appended since it was read (their records would be
+        // lost). A plain write handle is needed: a handle opened for append cannot be truncated on
+        // Windows.
+        let on_disk = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        if self.file_len > self.valid_len && on_disk == self.file_len {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.path)?
+                .set_len(self.valid_len)?;
+            self.file_len = self.valid_len;
         }
+        let mut f = open_private_append(&self.path)?;
         let mut buf = Vec::new();
         for key in self.pending.drain(..) {
             let v = &self.map[&key];
@@ -470,7 +483,11 @@ impl EmbeddingCache {
             }
         }
         f.write_all(&buf)?;
-        self.valid_len += buf.len() as u64;
+        let now = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        if self.file_len == self.valid_len {
+            self.valid_len = now; // a clean file stays clean as it grows
+        }
+        self.file_len = now;
         Ok(())
     }
 }
@@ -999,6 +1016,33 @@ mod tests {
             c.get("m", "second").is_some(),
             "record appended after the bad tail is readable"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_concurrent_writer_does_not_lose_its_records_to_the_tail_cut() {
+        let path = std::env::temp_dir().join(format!("dc-embed-conc-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut c = EmbeddingCache::load(&path);
+        c.insert("m", "first", vec![1.0]);
+        c.flush().unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&[9, 0, 1]).unwrap();
+        drop(f);
+        // two processes read the same file with a bad tail ...
+        let mut a = EmbeddingCache::load(&path);
+        let mut b = EmbeddingCache::load(&path);
+        a.insert("m", "from-a", vec![2.0]);
+        a.flush().unwrap(); // cuts the tail and appends
+        b.insert("m", "from-b", vec![3.0]);
+        b.flush().unwrap(); // the file changed since it was read: must not cut away a's record
+        let c = EmbeddingCache::load(&path);
+        for key in ["first", "from-a", "from-b"] {
+            assert!(c.get("m", key).is_some(), "{key} must survive");
+        }
         let _ = std::fs::remove_file(&path);
     }
 

@@ -163,7 +163,7 @@ Queries are the 50 loose task descriptions; the corpus is the strict implementat
 | --- | --- | --- | --- | --- | --- |
 | 168 units | all-MiniLM-L6-v2 | 0.94 | 1.00 | 1.00 | 0.970 |
 | 168 units | Qwen3-Embedding-0.6B | 0.96 | 1.00 | 1.00 | 0.977 |
-| + 1,379 real units (Fabricks.Runtime) | all-MiniLM-L6-v2 | 0.82 | 0.96 | 1.00 | 0.893 |
+| + 1,379 real units (an internal Python/SQL repository) | all-MiniLM-L6-v2 | 0.82 | 0.96 | 1.00 | 0.893 |
 
 Caveats: the queries were written for these tasks and the units contain docstrings, so this measures
 "find the function I just described", not arbitrary code search; the distractors are from one repo.
@@ -178,9 +178,9 @@ or a hosted endpoint.
 ### Fragment-level clones (`duplicatecode fragments`)
 
 Benchmark (`eval/make_fragment_data.py`, `eval/eval_fragments.py`): a renamed block of N consecutive
-statements from one real function (Fabricks.Runtime) is pasted into a different function; the detector
+statements from one real function (an internal Python/SQL repository) is pasted into a different function; the detector
 must report that pair with at least half the block overlapping. Constructors/dunders are excluded because
-the tool ignores them by design (Python set: Fabricks.Runtime, 111 candidate functions).
+the tool ignores them by design (Python set: 111 candidate functions from that repository).
 
 | block size | Python: 5 stmts / 40 tokens | Python: 4 / 30 (default) | TypeScript/TSX: 5 / 40 | TypeScript/TSX: 4 / 30 (default) |
 | --- | --- | --- | --- | --- |
@@ -194,12 +194,12 @@ TypeScript package has no free-threaded 3.14 wheel) pastes renamed statement blo
 `function_declaration`s from OneSales/frontend; it has 94 candidate functions, so the numbers are noisy
 (40 / 45 / 31 injected pairs for blocks 6 / 4 / 8). SQL fragments are not benchmarked.
 
-Sampled non-injected reports were real duplicates in the repo (the same secret-handling block, the same
-forecasting steps, `get_receivers` copied across three email providers), not noise. One bug found
+Sampled non-injected reports were real duplicates in the repo (the same credential-handling block, the same
+model-forecasting steps, a helper copied across three similar modules), not noise. One bug found
 by looking at results: a one-line list comprehension is expanded into several pseudo-statements, so a
 repeated comprehension looked like a 4-statement block; the minimum now counts distinct source statements.
-On the full Fabricks.Runtime it takes under 3 s and finds, among others, whole copied folders
-(`cip` vs `cip2`) and a `BetterDatabricks` class duplicated in two modules.
+On a 1.4k-unit internal repository it takes under 3 s and finds, among others, whole copied folders
+and a class duplicated in two modules.
 
 ### Benchmark hygiene (after Allamanis, arXiv 1812.06469)
 
@@ -230,7 +230,7 @@ model reproduces the offline gain inside the shipped scoring code.
 ### `--explain`
 
 `scan --pairs --explain` lists, per pair, the literals and calls only one side has and the source lines
-without a counterpart, e.g. `parallel_process` in `cip` vs `cip2`: "16 of 18/17 statements shared, differing
+without a counterpart, e.g. a batch-upload helper in two sibling folders: "16 of 18/17 statements shared, differing
 lines 237-247 vs 95-107".
 
 ## What could still be optimized
@@ -253,7 +253,7 @@ lines 237-247 vs 95-107".
    (`values:key[0].data::string`, `left anti join`, backticks) parses with error nodes. Alias/CTE
    resolution is name-based; a real scope pass and column lineage would make renames and CTE-vs-subquery
    rewrites exact. The synthetic SQL set saturates (0.99), so real labelled pairs from
-   `Fabricks.Runtime` are the next test.
+   internal repositories are the next test.
 6. **JavaScript is the weakest language (0.50).** Input handling idioms (`readFileSync`, `process.stdin`
    events, `readline`) and loop styles (`for` / `forEach` / `map` / `reduce`) differ per author; canonical
    forms for these would help, and a loop-to-iterator normalization like the Python comprehension one.
@@ -262,9 +262,8 @@ lines 237-247 vs 95-107".
 8. **Scan speed with the new weights.** The reimpl profile's structural weight is small, so the k-gram
    prefilter prunes less; measure scan time on large repos before making it a default. SQL scoring with
    structural weight 0 compares every same-family unit.
-9. **GPU.** The RTX 4080 is present but the NVIDIA kernel module is not loaded and `sudo` is denied, so CPU
-   was used for all embedding runs (about 2.5 s per file with a 0.6B model). `eval/setup-gpu.sh` needs
-   someone with root.
+9. **GPU.** All embedding runs used the CPU (about 2.5 s per file with a 0.6B model); the PyPI `embed-anything`
+   wheel is CPU-only, so GPU use needs a CUDA build.
 
 ## Limitations of these numbers
 

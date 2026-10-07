@@ -70,6 +70,19 @@ Two optional signals, both off by default (the detector stays static and offline
   [ollama](https://ollama.com): `ollama pull embeddinggemma`), the best model in the codebase benchmark (issue #12: re-implementation
   retrieval R@1 0.94 vs 0.89 for the static detector alone, unchanged when function names are masked). Other presets:
   `--embed=minilm|qwen3|potion|openai|cohere`; MiniLM is smaller but clearly weaker (0.85) and leans on names. Model ids go into the cache key, so vectors of different models never mix.
+**How much it helps, and what is not proven.** On the labeled holdout (`eval-groups`) the score goes from 0.76 to
+0.91 with `--embed` (gemma): independently written solutions to the same task improve most (Python 0.66 to 0.95,
+JavaScript 0.50 to 0.79, TypeScript functions 0.73 to 0.92); sets that were already easy (SQL, React) barely move.
+Without `--embed` nothing changes. Not measured yet:
+- the false-positive rate of a real `scan` on a real repository (the benchmark measures ranking, not how many wrong
+  pairs you see); the thresholds used with embeddings were tuned for MiniLM, so expect to adjust `--threshold`;
+- the CodeNet holdout shares a few problems with the dev set (13 of 60 Python, 4 of 60 JavaScript), so those two
+  numbers are somewhat optimistic;
+- the public-library part of the retrieval benchmark is probably inflated because the model that wrote the
+  re-implementations may have seen those libraries; the internal codebases are the cleaner signal.
+It also needs ollama with the model pulled, and a GPU to be fast (about 5 ms per unit; much slower on CPU).
+Details: issue #12.
+
 - `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
   the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
   re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from

@@ -136,8 +136,9 @@ Proposal:
 - **Default: `sentence-transformers/all-MiniLM-L6-v2`.** Statistically tied with Qwen3-0.6B on this data at
   a quarter of the time per text, 22M parameters and 384-dim vectors (small cache). Caveat: it truncates at
   256 word pieces, so it sees only the start of long units.
-- **Quality option: `Qwen/Qwen3-Embedding-0.6B`.** Same measured gain, 8k-token context, better on
-  TypeScript dev cosine (0.72 vs 0.68); use it where units are long and CPU time is not a concern.
+- **Quality option: `Qwen/Qwen3-Embedding-0.6B`, only with a GPU or hosted endpoint.** Same measured gain,
+  8k-token context, better on TypeScript dev cosine (0.72 vs 0.68), but about 5x slower than MiniLM on CPU
+  (roughly 3.5 hours for a first scan of an 11,000-unit repository), so it is not a CPU default.
 - **Instant, no-model-server option: `minishlab/potion-base-8M`.** About 1 ms per text and still positive
   (+0.013), useful as a cheap always-on signal.
 - **Hosted:** OpenAI `text-embedding-3-small` and Cohere `embed-v4.0` are wired in but not measured (no
@@ -166,7 +167,13 @@ Queries are the 50 loose task descriptions; the corpus is the strict implementat
 
 Caveats: the queries were written for these tasks and the units contain docstrings, so this measures
 "find the function I just described", not arbitrary code search; the distractors are from one repo.
-The Qwen3 run with distractors was still in progress when this was written.
+The Qwen3 run with distractors was **stopped without a result**: embedding the 1,547-unit corpus on the CPU
+did not finish in about 40 minutes of wall time (two attempts, the first hit the 30-minute background
+limit). That is itself the finding: at the measured ~1.2 s per unit (four benchmarks sharing the CPU), a
+first scan of a repository with 11,000 units would take about 3.5 hours with Qwen3-0.6B, against about 45
+minutes for MiniLM (~0.25 s per unit) and well under a minute for potion-base-8M (~1 ms). Vectors are cached
+per unit text, so this is a one-time cost per unit, but Qwen3 is not a practical default on CPU; it needs a GPU
+or a hosted endpoint.
 
 ### Fragment-level clones (`duplicatecode fragments`)
 

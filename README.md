@@ -59,7 +59,7 @@ duplicatecode find "retry with exponential backoff" src/   # does something like
 Two optional signals, both off by default (the detector stays LLM-free unless you ask):
 
 - `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
-- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`) and implies
+- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`; `qwen3` is about 5x slower than `minilm` on CPU, so use it with a GPU or prefer `minilm`) and implies
   `--embed-code`. Model ids go into the cache key, so vectors of different models never mix.
 - `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
   the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds

@@ -4,7 +4,7 @@
 
 use crate::naming::split_identifier;
 use crate::units::Unit;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +17,8 @@ pub enum Style {
     Foundry,
     /// `{endpoint}/embeddings` with `model` in the body (OpenAI and compatible servers)
     OpenAi,
+    /// `{endpoint}/v2/embed` (Cohere): `texts` + `input_type`, vectors under `embeddings.float`
+    Cohere,
 }
 
 #[derive(Clone, Debug)]
@@ -38,27 +40,43 @@ fn env_first(names: &[&str]) -> Option<String> {
 }
 
 impl EmbedConfig {
-    /// Reads `AZURE_AI_FOUNDRY_ENDPOINT` (or `AZURE_OPENAI_ENDPOINT`, `DUPLICATECODE_EMBED_ENDPOINT`),
-    /// `…_API_KEY`, `…_EMBEDDING_DEPLOYMENT` and `…_API_VERSION`. Without an API key an Entra ID token
-    /// from `az account get-access-token` is used.
+    /// Reads `AZURE_AI_FOUNDRY_ENDPOINT` (or `AZURE_OPENAI_ENDPOINT`, `DUPLICATECODE_EMBED_ENDPOINT`,
+    /// `OPENAI_BASE_URL`), `…_API_KEY` (incl. `OPENAI_API_KEY`), `…_EMBEDDING_DEPLOYMENT` /
+    /// `OPENAI_EMBEDDING_MODEL` and `…_API_VERSION`. With only `OPENAI_API_KEY` set, api.openai.com is
+    /// used. Without an API key on an Azure endpoint, an Entra ID token from `az` is used.
     pub fn from_env(dims: Option<u32>) -> Option<EmbedConfig> {
         let endpoint = env_first(&[
             "AZURE_AI_FOUNDRY_ENDPOINT",
             "AZURE_OPENAI_ENDPOINT",
             "DUPLICATECODE_EMBED_ENDPOINT",
-        ])?;
+            "OPENAI_BASE_URL",
+            "COHERE_BASE_URL",
+        ])
+        .or_else(|| env_first(&["OPENAI_API_KEY"]).map(|_| "https://api.openai.com/v1".to_string()))
+        .or_else(|| env_first(&["COHERE_API_KEY"]).map(|_| "https://api.cohere.com".to_string()))?;
+        let model = env_first(&[
+            "AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT",
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+            "DUPLICATECODE_EMBED_MODEL",
+            "OPENAI_EMBEDDING_MODEL",
+            "COHERE_EMBEDDING_MODEL",
+        ])
+        .unwrap_or_else(|| {
+            if endpoint.contains("cohere") {
+                "embed-v4.0".into()
+            } else {
+                "text-embedding-3-small".into()
+            }
+        });
         Some(EmbedConfig::new(
             endpoint,
-            env_first(&[
-                "AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT",
-                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
-                "DUPLICATECODE_EMBED_MODEL",
-            ])
-            .unwrap_or_else(|| "text-embedding-3-small".into()),
+            model,
             env_first(&[
                 "AZURE_AI_FOUNDRY_API_KEY",
                 "AZURE_OPENAI_API_KEY",
                 "DUPLICATECODE_EMBED_API_KEY",
+                "OPENAI_API_KEY",
+                "COHERE_API_KEY",
             ]),
             env_first(&["AZURE_AI_FOUNDRY_API_VERSION", "AZURE_OPENAI_API_VERSION"]),
             dims,
@@ -73,7 +91,9 @@ impl EmbedConfig {
         dims: Option<u32>,
     ) -> Self {
         let e = endpoint.trim_end_matches('/').to_string();
-        let style = if e.contains(".openai.azure.com") {
+        let style = if e.contains("cohere.com") || e.contains("cohere.ai") {
+            Style::Cohere
+        } else if e.contains(".openai.azure.com") {
             Style::AzureOpenAi
         } else if e.contains(".services.ai.azure.com")
             || e.contains(".inference.ai.azure.com")
@@ -117,10 +137,24 @@ impl EmbedConfig {
                 self.api_version.as_deref().unwrap_or("2024-05-01-preview")
             ),
             Style::OpenAi => format!("{}/embeddings", self.endpoint),
+            Style::Cohere => format!("{}/v2/embed", self.endpoint),
         }
     }
 
     fn body(&self, texts: &[String]) -> serde_json::Value {
+        if self.style == Style::Cohere {
+            let mut b = serde_json::json!({
+                "model": self.deployment,
+                "texts": texts,
+                "input_type": "search_document",
+                "embedding_types": ["float"],
+            });
+            // only embed-v4.0 accepts a reduced output size
+            if let Some(d) = self.dims.filter(|_| self.deployment.contains("v4")) {
+                b["output_dimension"] = d.into();
+            }
+            return b;
+        }
         let mut b = serde_json::json!({ "input": texts });
         if self.style != Style::AzureOpenAi {
             b["model"] = self.deployment.clone().into();
@@ -133,7 +167,11 @@ impl EmbedConfig {
 
     fn auth(&self) -> Result<(String, String), String> {
         if let Some(k) = &self.api_key {
-            return Ok(("api-key".into(), k.clone()));
+            return Ok(match self.style {
+                // OpenAI and compatible servers expect a bearer token; Azure uses `api-key`.
+                Style::OpenAi | Style::Cohere => ("Authorization".into(), format!("Bearer {k}")),
+                _ => ("api-key".into(), k.clone()),
+            });
         }
         if let Some(t) = env_first(&["AZURE_AI_FOUNDRY_TOKEN"]) {
             return Ok(("Authorization".into(), format!("Bearer {t}")));
@@ -168,6 +206,9 @@ impl EmbedConfig {
             match ureq::post(&url).set(&hk, &hv).send_json(body.clone()) {
                 Ok(resp) => {
                     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+                    if self.style == Style::Cohere {
+                        return check_count(parse_cohere(&v)?, texts.len());
+                    }
                     let mut rows: Vec<(usize, Vec<f32>)> = v["data"]
                         .as_array()
                         .ok_or("response has no `data` array")?
@@ -219,6 +260,31 @@ impl EmbedConfig {
         }
         Err(format!("embedding request failed: {last}"))
     }
+}
+
+fn check_count(rows: Vec<Vec<f32>>, expected: usize) -> Result<Vec<Vec<f32>>, String> {
+    if rows.len() == expected {
+        Ok(rows)
+    } else {
+        Err(format!(
+            "expected {expected} embeddings, got {}",
+            rows.len()
+        ))
+    }
+}
+
+/// Cohere v2: `{"embeddings": {"float": [[...], ...]}}`
+fn parse_cohere(v: &serde_json::Value) -> Result<Vec<Vec<f32>>, String> {
+    v["embeddings"]["float"]
+        .as_array()
+        .ok_or("response has no `embeddings.float` array")?
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+                .ok_or_else(|| "embedding row is not an array".to_string())
+        })
+        .collect()
 }
 
 /// Append-only flat-file cache: repeated records of
@@ -339,6 +405,36 @@ pub fn name_phrase(name: &str) -> String {
     split_identifier(name).join(" ")
 }
 
+/// Embed every `(cache key, text)` in `wanted` that the cache does not hold yet, `chunk` texts per
+/// request, flushing after each request so progress survives a failure later on.
+fn fetch_missing(
+    cfg: &EmbedConfig,
+    cache: &mut EmbeddingCache,
+    model: &str,
+    wanted: &BTreeMap<String, String>,
+    chunk: usize,
+) -> Result<EmbedStats, String> {
+    let missing: Vec<(&String, &String)> = wanted
+        .iter()
+        .filter(|(k, _)| cache.get(model, k).is_none())
+        .collect();
+    let mut stats = EmbedStats {
+        distinct_names: wanted.len(),
+        from_cache: wanted.len() - missing.len(),
+        fetched: 0,
+    };
+    for batch in missing.chunks(chunk) {
+        let texts: Vec<String> = batch.iter().map(|(_, t)| (*t).clone()).collect();
+        let vecs = cfg.embed_batch(&texts)?;
+        for ((k, _), v) in batch.iter().zip(vecs) {
+            cache.insert(model, k, normalize(v));
+        }
+        stats.fetched += batch.len();
+        cache.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(stats)
+}
+
 /// Attach a unit-length embedding of every unit's name (cache first, then the endpoint in batches).
 pub fn embed_unit_names(
     units: &mut [Unit],
@@ -346,33 +442,72 @@ pub fn embed_unit_names(
     cache: &mut EmbeddingCache,
 ) -> Result<EmbedStats, String> {
     let model = cfg.model_id();
-    let mut phrases: Vec<String> = units
+    let phrases: Vec<String> = units.iter().map(|u| name_phrase(&u.name)).collect();
+    let wanted = phrases
         .iter()
-        .map(|u| name_phrase(&u.name))
         .filter(|p| !p.is_empty())
+        .map(|p| (p.clone(), p.clone()))
         .collect();
-    phrases.sort();
-    phrases.dedup();
-    let mut stats = EmbedStats {
-        distinct_names: phrases.len(),
-        ..Default::default()
-    };
-    let missing: Vec<String> = phrases
-        .iter()
-        .filter(|p| cache.get(&model, p).is_none())
-        .cloned()
-        .collect();
-    stats.from_cache = phrases.len() - missing.len();
-    for chunk in missing.chunks(64) {
-        let vecs = cfg.embed_batch(chunk)?;
-        for (t, v) in chunk.iter().zip(vecs) {
-            cache.insert(&model, t, normalize(v));
-        }
-        stats.fetched += chunk.len();
-        cache.flush().map_err(|e| e.to_string())?; // keep progress if a later batch fails
+    let stats = fetch_missing(cfg, cache, &model, &wanted, 64)?;
+    for (u, p) in units.iter_mut().zip(&phrases) {
+        u.name_vec = cache.get(&model, p);
     }
-    for u in units.iter_mut() {
-        u.name_vec = cache.get(&model, &name_phrase(&u.name));
+    Ok(stats)
+}
+
+/// Unit-length embedding of one free-text query (for searching units by description).
+pub fn embed_query(cfg: &EmbedConfig, text: &str) -> Result<Vec<f32>, String> {
+    let mut rows = cfg.embed_batch(&[text.to_string()])?;
+    rows.pop()
+        .map(normalize)
+        .ok_or_else(|| "empty embedding response".into())
+}
+
+/// Cache key of a unit text: FNV-1a (stable across Rust releases, unlike `DefaultHasher`) plus the
+/// length, so a toolchain upgrade does not invalidate stored vectors.
+fn code_key(text: &str) -> String {
+    let h = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("code:{h:016x}:{}", text.len())
+}
+
+/// Attach a unit-length embedding of every unit's source text (cache first, then the endpoint in
+/// small batches; texts are cut at `max_chars`). Identical texts are embedded once.
+pub fn embed_unit_code(
+    units: &mut [Unit],
+    cfg: &EmbedConfig,
+    cache: &mut EmbeddingCache,
+    max_chars: usize,
+) -> Result<EmbedStats, String> {
+    let model = format!("{}:code", cfg.model_id());
+    let keys: Vec<Option<String>> = units
+        .iter()
+        .map(|u| {
+            let text = &u.text[..u
+                .text
+                .char_indices()
+                .nth(max_chars)
+                .map_or(u.text.len(), |c| c.0)];
+            (!text.trim().is_empty()).then(|| code_key(text))
+        })
+        .collect();
+    let wanted = units
+        .iter()
+        .zip(&keys)
+        .filter_map(|(u, k)| {
+            let k = k.as_ref()?;
+            let end = u
+                .text
+                .char_indices()
+                .nth(max_chars)
+                .map_or(u.text.len(), |c| c.0);
+            Some((k.clone(), u.text[..end].to_string()))
+        })
+        .collect();
+    let stats = fetch_missing(cfg, cache, &model, &wanted, 16)?;
+    for (u, k) in units.iter_mut().zip(&keys) {
+        u.vec = k.as_ref().and_then(|k| cache.get(&model, k));
     }
     Ok(stats)
 }
@@ -505,6 +640,47 @@ mod tests {
     }
 
     #[test]
+    fn embeds_unit_code_once_per_distinct_text() {
+        let (reqs, seen) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(std::sync::Mutex::new(vec![])),
+        );
+        let cfg = EmbedConfig::new(
+            fake_server(reqs.clone(), seen),
+            "m".into(),
+            Some("k".into()),
+            None,
+            Some(3),
+        );
+        let path = std::env::temp_dir().join(format!("dc-embed-code-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut units: Vec<Unit> = ["a", "b", "a"]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, n)| {
+                crate::extract_units(
+                    &format!("{i}.py"),
+                    crate::Lang::Python,
+                    &format!(
+                        "def f(x):\n    return x + {}\n",
+                        if *n == "a" { 1 } else { 2 }
+                    ),
+                )
+            })
+            .collect();
+        let mut cache = EmbeddingCache::load(&path);
+        let st = embed_unit_code(&mut units, &cfg, &mut cache, 3000).unwrap();
+        assert_eq!((st.distinct_names, st.fetched), (2, 2));
+        assert!(units.iter().all(|u| u.vec.is_some()));
+        assert_eq!(units[0].vec, units[2].vec);
+        assert_ne!(units[0].vec, units[1].vec);
+        let st2 =
+            embed_unit_code(&mut units, &cfg, &mut EmbeddingCache::load(&path), 3000).unwrap();
+        assert_eq!((st2.fetched, st2.from_cache), (0, 2));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn detects_provider_style_and_urls() {
         let az = EmbedConfig::new(
             "https://r.openai.azure.com/".into(),
@@ -533,6 +709,54 @@ mod tests {
         );
         assert_eq!(f.body(&["a".into()])["model"], "text-embedding-3-small");
         assert_eq!(f.body(&["a".into()])["dimensions"], 256);
+    }
+
+    #[test]
+    fn api_key_header_depends_on_style() {
+        let mk = |e: &str| EmbedConfig::new(e.into(), "m".into(), Some("sk-1".into()), None, None);
+        assert_eq!(
+            mk("https://api.openai.com/v1").auth().unwrap(),
+            ("Authorization".into(), "Bearer sk-1".into())
+        );
+        assert_eq!(
+            mk("https://r.openai.azure.com").auth().unwrap(),
+            ("api-key".into(), "sk-1".into())
+        );
+    }
+
+    #[test]
+    fn cohere_style_url_body_auth_and_response() {
+        let c = EmbedConfig::new(
+            "https://api.cohere.com/".into(),
+            "embed-v4.0".into(),
+            Some("co-key".into()),
+            None,
+            Some(256),
+        );
+        assert_eq!(c.style, Style::Cohere);
+        assert_eq!(c.url(), "https://api.cohere.com/v2/embed");
+        assert_eq!(
+            c.auth().unwrap(),
+            ("Authorization".into(), "Bearer co-key".into())
+        );
+        let b = c.body(&["x".into(), "y".into()]);
+        assert_eq!(b["texts"].as_array().unwrap().len(), 2);
+        assert_eq!(b["input_type"], "search_document");
+        assert_eq!(b["output_dimension"], 256);
+        // v3 models do not accept output_dimension
+        let v3 = EmbedConfig::new(
+            "https://api.cohere.com".into(),
+            "embed-english-v3.0".into(),
+            None,
+            None,
+            Some(256),
+        );
+        assert!(v3.body(&["x".into()]).get("output_dimension").is_none());
+        let rows =
+            parse_cohere(&serde_json::json!({"embeddings": {"float": [[1.0, 2.0], [3.0, 4.0]]}}))
+                .unwrap();
+        assert_eq!(rows, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        assert!(parse_cohere(&serde_json::json!({"embeddings": {}})).is_err());
     }
 
     #[test]

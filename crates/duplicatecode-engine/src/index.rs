@@ -1,7 +1,10 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice};
+use crate::similarity::{
+    containment, cosine, dot, jaccard, lcs_ratio, multiset_dice, weighted_jaccard,
+};
 use crate::units::Unit;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Scores {
@@ -27,6 +30,8 @@ pub struct Scores {
     pub stmt_shape: f64,
     /// Order-aware alignment (LCS) of statement shapes.
     pub stmt_lcs: f64,
+    /// Cosine of the whole-unit code embeddings; 0 when either side has none.
+    pub embed: f64,
     pub combined: f64,
 }
 
@@ -44,11 +49,17 @@ impl Scores {
             self.stmt_exact,
             self.stmt_shape,
             self.stmt_lcs,
+            self.containment,
+            self.embed,
         ]
     }
 }
 
-pub const N_FEATURES: usize = 10;
+pub const N_FEATURES: usize = 12;
+const FEAT_LITERALS: usize = 3;
+const FEAT_API: usize = 4;
+const FEAT_CALLEES: usize = 6;
+const FEAT_EMBED: usize = 11;
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "structural",
     "loose",
@@ -60,6 +71,8 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "stmt_exact",
     "stmt_shape",
     "stmt_lcs",
+    "containment",
+    "embed",
 ];
 
 /// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
@@ -69,6 +82,58 @@ pub struct Weights {
     pub w: [f64; N_FEATURES],
     /// Embedding cosine at/below which two names count as unrelated (scaled to 0 at the floor, 1 at 1.0).
     pub name_floor: f64,
+    /// Replacement weights for SQL, whose clones are best told apart by loose n-grams, referenced
+    /// tables/columns and literals rather than by exact 4-gram structure.
+    pub sql: Option<[f64; N_FEATURES]>,
+    /// Replacement weights for whole-file units (scripts): their names carry no information.
+    pub file: Option<[f64; N_FEATURES]>,
+    /// Leave out literals/api/callees when neither side has any and spread their weight over the
+    /// rest, so structurally identical code without literals is not penalized.
+    pub renormalize: bool,
+}
+
+impl Weights {
+    /// Give the code-embedding cosine weight `lambda` and scale every other weight by `1 - lambda`
+    /// (also in the file/SQL overrides). Units without vectors skip the feature (see `renormalize`).
+    pub fn with_embed(&self, lambda: f64) -> Weights {
+        let mix = |w: [f64; N_FEATURES]| {
+            let mut o = w.map(|x| x * (1.0 - lambda));
+            o[FEAT_EMBED] = lambda;
+            o
+        };
+        Weights {
+            w: mix(self.w),
+            file: self.file.map(mix),
+            sql: self.sql.map(mix),
+            renormalize: true,
+            ..*self
+        }
+    }
+
+    /// Factor by which the remaining weights are scaled when `skipped` weight is left out.
+    pub fn renorm_scale(&self, skipped: f64) -> f64 {
+        let total: f64 = self.w.iter().sum();
+        if total - skipped > 1e-9 {
+            total / (total - skipped)
+        } else {
+            1.0
+        }
+    }
+
+    /// The weights to use when comparing units like `u`.
+    pub fn for_unit(&self, u: &Unit) -> Weights {
+        let over = match (u.lang, u.kind.as_str()) {
+            (crate::lang::Lang::Sql, _) => self.sql,
+            (_, "file") => self.file,
+            _ => None,
+        };
+        over.map_or(*self, |w| Weights {
+            w,
+            sql: None,
+            file: None,
+            ..*self
+        })
+    }
 }
 
 impl Default for Weights {
@@ -76,8 +141,17 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
+            w: [
+                0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26, 0.0,
+            ],
             name_floor: 0.5,
+            renormalize: true,
+            file: Some([
+                0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0, 0.0,
+            ]),
+            sql: Some([
+                0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ]),
         }
     }
 }
@@ -90,8 +164,13 @@ impl Weights {
     pub fn copies() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
+            w: [
+                0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0, 0.0,
+            ],
             name_floor: 0.5,
+            renormalize: false,
+            file: None,
+            sql: None,
         }
     }
 }
@@ -100,27 +179,62 @@ pub fn score(a: &Unit, b: &Unit) -> Scores {
     score_with(a, b, &Weights::default())
 }
 
+/// Inverse document frequency of token n-grams over a set of units: n-grams that occur in most
+/// units (I/O boilerplate, loop headers) say little about whether two units are clones.
+pub struct Idf {
+    fp: HashMap<u64, f64>,
+    fp2: HashMap<u64, f64>,
+}
+
+impl Idf {
+    pub fn from_units(units: &[Unit]) -> Idf {
+        fn table<'a>(
+            sets: impl Iterator<Item = &'a std::collections::BTreeSet<u64>>,
+            n: usize,
+        ) -> HashMap<u64, f64> {
+            let mut df: HashMap<u64, u32> = HashMap::new();
+            for s in sets {
+                for g in s {
+                    *df.entry(*g).or_default() += 1;
+                }
+            }
+            df.into_iter()
+                .map(|(g, d)| (g, (1.0 + n as f64 / d as f64).ln()))
+                .collect()
+        }
+        let n = units.len().max(1);
+        Idf {
+            fp: table(units.iter().map(|u| &u.fingerprint), n),
+            fp2: table(units.iter().map(|u| &u.fingerprint2), n),
+        }
+    }
+}
+
 /// Lexical subword overlap, or — when both names have embeddings — the better of that and the
 /// calibrated embedding cosine (so `pickName` ~ `pickLocalizedLabel` can still register).
 fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
     let lexical = jaccard(&a.name_parts, &b.name_parts);
     match (&a.name_vec, &b.name_vec) {
-        (Some(x), Some(y)) if x.len() == y.len() => {
-            let cos: f64 = x
-                .iter()
-                .zip(y.iter())
-                .map(|(p, q)| (*p as f64) * (*q as f64))
-                .sum();
-            lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0))
-        }
+        (Some(x), Some(y)) => match dot(x, y) {
+            Some(cos) => lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0)),
+            None => lexical,
+        },
         _ => lexical,
     }
 }
 
 pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
+    score_with_idf(a, b, weights, None)
+}
+
+pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
+    let weights = &weights.for_unit(a);
+    let idf_weight = |table: fn(&Idf) -> &HashMap<u64, f64>| {
+        move |g: &u64| idf.and_then(|i| table(i).get(g)).copied().unwrap_or(1.0)
+    };
     let mut s = Scores {
-        structural: jaccard(&a.fingerprint, &b.fingerprint),
-        loose: jaccard(&a.fingerprint2, &b.fingerprint2),
+        structural: weighted_jaccard(&a.fingerprint, &b.fingerprint, idf_weight(|i| &i.fp)),
+        loose: weighted_jaccard(&a.fingerprint2, &b.fingerprint2, idf_weight(|i| &i.fp2)),
         containment: containment(&a.fingerprint, &b.fingerprint),
         kinds: cosine(&a.kinds, &b.kinds),
         literals: jaccard(&a.literals, &b.literals),
@@ -130,14 +244,31 @@ pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
         stmt_exact: multiset_dice(&a.stmts_exact, &b.stmts_exact),
         stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
         stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
+        embed: match (&a.vec, &b.vec) {
+            (Some(x), Some(y)) => dot(x, y).unwrap_or(0.0).clamp(0.0, 1.0),
+            _ => 0.0,
+        },
         combined: 0.0,
     };
-    s.combined = weights.bias
-        + s.features()
-            .iter()
-            .zip(weights.w)
-            .map(|(f, w)| f * w)
-            .sum::<f64>();
+    // Features that neither side has (no literals, no calls, no vector) say nothing: leave them
+    // out and spread their weight over the features that do apply.
+    let mut w = weights.w;
+    if weights.renormalize {
+        let empty = |x: &std::collections::BTreeSet<String>| x.is_empty();
+        for (feature, absent) in [
+            (FEAT_LITERALS, empty(&a.literals) && empty(&b.literals)),
+            (FEAT_API, empty(&a.api) && empty(&b.api)),
+            (FEAT_CALLEES, empty(&a.callees) && empty(&b.callees)),
+            (FEAT_EMBED, a.vec.is_none() || b.vec.is_none()),
+        ] {
+            if absent {
+                w[feature] = 0.0;
+            }
+        }
+    }
+    let scale = weights.renorm_scale(weights.w.iter().sum::<f64>() - w.iter().sum::<f64>());
+    let sum: f64 = s.features().iter().zip(w).map(|(f, w)| f * w).sum();
+    s.combined = weights.bias + scale * sum;
     s
 }
 
@@ -300,13 +431,22 @@ impl Corpus {
             }
             return out;
         }
-        let (threshold, w) = (opts.threshold, &opts.weights);
+        let (threshold, w) = (opts.threshold, &opts.weights.for_unit(q));
+        if w.w[0] <= 0.0 {
+            // no exact-4-gram term to bound the score by: every same-family unit is a candidate
+            return (0..self.units.len() as u32)
+                .filter(|i| self.units[*i as usize].lang.family() == q.lang.family())
+                .collect();
+        }
         let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
-        let min_jaccard = if w.w[0] > 0.0 {
-            ((threshold - rest) / w.w[0]).max(0.0)
+        // features absent on both sides are renormalized away, which can raise a score by at most
+        // `renorm_scale`; bound with it so the prefilter stays exact
+        let skippable = if w.renormalize {
+            w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES] + w.w[FEAT_EMBED]
         } else {
             0.0
         };
+        let min_jaccard = ((threshold / w.renorm_scale(skippable) - rest) / w.w[0]).max(0.0);
         let min_shared = ((min_jaccard * q.fingerprint.len() as f64).ceil() as u32).max(1);
         let mut counts: std::collections::HashMap<u32, u32> = Default::default();
         for h in &q.fingerprint {

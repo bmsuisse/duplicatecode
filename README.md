@@ -1,6 +1,6 @@
 # duplicatecode
 
-Static (LLM-free) detection of duplicate / similar code in Python, TypeScript (TSX) and C#,
+Static (LLM-free) detection of duplicate / similar code in Python, TypeScript/JavaScript (TSX/JSX), SQL and C#,
 aimed at catching an LLM re-implementing something that already exists. Input can be a git diff
 checked against existing source.
 
@@ -31,6 +31,134 @@ duplicatecode scan . --exclude '**/generated/**' --skip-tests --fail-on-found   
 duplicatecode scan . --pairs --json                  # machine-readable pairs instead of groups
 duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives <other repo>]
 ```
+
+## More ways to look
+
+```sh
+duplicatecode fragments packages/            # copied blocks inside different functions (4+ identical statements)
+duplicatecode scan . --pairs --explain       # say what differs: literals, calls, lines (what to parameterize)
+duplicatecode find "retry with exponential backoff" src/   # does something like this already exist? (needs embeddings)
+```
+
+- `fragments` indexes windows of consecutive normalized statements, so a block pasted into another
+  function is found even when the surrounding functions differ. On an injection benchmark (renamed
+  blocks of real functions pasted into others) it finds 93-97% of blocks of 6+ statements; see
+  `eval/REPORT.md`. Tune with `--min-stmts` / `--min-tokens`; constructors and dunders are ignored.
+- `--explain` adds, per pair, the literals and calls only one side has and the source lines with no
+  counterpart ("16 of 18/17 statements shared").
+- `find` embeds the query and every unit and ranks by similarity. With MiniLM, 50 task descriptions
+  against 168 implementation units rank the right one first 94% of the time; with 1,379 unrelated real
+  units mixed in, 82% first and 96% in the top 3 (every query within the top 10).
+- Default thresholds depend on the profile: `copies` keeps its tuned 0.6 (`scan`), 0.4 (`diff`), 0.45
+  (`review`); `reimpl` scores live lower, so it defaults to 0.35 / 0.28 / 0.30, which correspond to roughly
+  0.1% / 1% false-positive rates on unrelated code in the benchmarks. With `--embed` the `reimpl`
+  defaults rise by 0.07 because blended scores of unrelated code rise too.
+
+## Embeddings (bring your own key)
+
+Two optional signals, both off by default (the detector stays LLM-free unless you ask):
+
+- `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
+- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`; `qwen3` is about 5x slower than `minilm` on CPU, so use it with a GPU or prefer `minilm`) and implies
+  `--embed-code`. Model ids go into the cache key, so vectors of different models never mix.
+- `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
+  the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
+  re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from
+  0.70 to 0.89 on a held-out half; see `eval/REPORT.md` for the numbers and caveats. Vectors are cached per
+  unit text in `~/.cache/duplicatecode/embeddings.bin`, so a rescan only embeds what changed.
+
+Credentials come from the environment:
+
+```sh
+# OpenAI
+export OPENAI_API_KEY=sk-...                      # optional: OPENAI_EMBEDDING_MODEL (default text-embedding-3-small)
+# Cohere (native /v2/embed)
+export COHERE_API_KEY=...                         # optional: COHERE_EMBEDDING_MODEL (default embed-v4.0)
+# OpenAI-compatible server (vLLM, Ollama, LiteLLM, ...)
+export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_EMBEDDING_MODEL=nomic-embed-text
+# Azure AI Foundry (key, or `az login` if no key is set)
+export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
+export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+# Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+# Fully local, no key: start the server once (CPU; it loads whichever model a request names)
+#   uv run --no-project --python 3.12 eval/embed_server.py
+#   duplicatecode scan . --embed minilm          # or: qwen3, potion  (default endpoint 127.0.0.1:8099)
+# Hosted presets: --embed openai (OPENAI_API_KEY), --embed cohere (COHERE_API_KEY)
+
+duplicatecode embed-test fetchUser getUser     # check credentials
+duplicatecode scan . --embed-code              # whole-unit embeddings
+duplicatecode scan . --embeddings              # names only
+```
+
+## API
+
+### Command line
+
+| command | what it does |
+| --- | --- |
+| `scan <paths>` | similar units inside one or more folders; `--pairs`, `--explain`, `--json`, `--fail-on-found` |
+| `diff` | check code added in a git diff (stdin or `--diff`) against the repo (`--repo`) |
+| `review` | ranked candidates for a diff, for a human or an agent to judge |
+| `fragments <paths>` | copied blocks of identical statements inside different functions |
+| `find "<description>" <paths>` | existing units closest to a plain-language description (needs embeddings) |
+| `units <path>` / `show file:10-40` | list extracted units / print a unit's source |
+| `embed-test <names...>` | check the embedding provider and calibrate `--embed-floor` |
+| `eval-groups`, `bench`, `make-mutation-groups` | evaluation (see `eval/README.md`) |
+
+Shared options: `--profile copies|reimpl`, `--threshold`, `--min-tokens`, `--min-lines`, `--exclude`, `--skip-tests`,
+`--cross-file`, `--json`. Embedding options (all off by default): `--embed <preset>`, `--embed-code`,
+`--embed-weight`, `--embed-max-chars`, `--embeddings`, `--embed-cache`, `--embed-dims`.
+
+```sh
+duplicatecode scan . --profile reimpl --min-name 0 --embed minilm --pairs --explain
+duplicatecode fragments src/ --min-stmts 4 --min-tokens 30 --cross-file --json
+duplicatecode find "retry with exponential backoff" src/ --top 5 --json
+duplicatecode diff --repo . < change.diff --embed openai
+```
+
+JSON output:
+
+- `find --json`: `[{score, file, name, kind, start_line, end_line}]`
+- `fragments --json`: `[{a, b, statements, tokens}]` with `a`/`b` = `{file, unit, start_line, end_line, coverage}`
+- `scan --pairs --json`: `[{query, candidate, scores}]`; with `--explain`: `[{match, explanation}]`
+- `scan --json` (groups): `[{score, units: [{file, name, kind, start_line, end_line}]}]`
+
+`scan --fail-on-found` exits with status 1 when anything is reported, for CI.
+
+### Rust library
+
+The engine crate `duplicatecode-engine` is what the CLI uses:
+
+```rust
+use duplicatecode_engine::embed::{embed_unit_code, EmbedConfig, EmbeddingCache};
+use duplicatecode_engine::explain::explain;
+use duplicatecode_engine::fragments::{find_fragments, FragmentOptions};
+use duplicatecode_engine::index::Weights;
+use duplicatecode_engine::{find_matches, load_units_with, Corpus, MatchOptions};
+
+let mut units = load_units_with(Path::new("src/"), &[]);
+
+// optional: embed every unit; units without a vector simply skip the embedding term
+let cfg = EmbedConfig::from_env(None).ok_or("no embedding provider configured")?;
+let mut cache = EmbeddingCache::load(&EmbeddingCache::default_path());
+embed_unit_code(&mut units, &cfg, &mut cache, 3000)?;
+
+// pairs: queries against a corpus
+let weights = Weights::default().with_embed(0.35); // 0.0 = static only
+let corpus = Corpus::new(units.clone());
+let pairs = find_matches(&units, &corpus, MatchOptions { weights, threshold: 0.42, ..Default::default() });
+
+// copied blocks, and what differs inside a pair
+let blocks = find_fragments(&units, FragmentOptions::default());
+println!("{}", explain(&units[0], &units[1]).summary());
+```
+
+### Not built yet
+
+Planned, not available today: a `.duplicatecode.toml` with an `[embed]` section; `--embed-optional` (warn and
+fall back to the static score when the provider is unreachable; today an unreachable provider is an error);
+`--allow-upload` (required for the hosted presets, which send source text out); a `duplicatecode[embed]` Python
+extra that starts the local server on demand; an `Embedder` trait so providers can plug in without HTTP.
 
 ## How it works
 

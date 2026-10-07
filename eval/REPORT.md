@@ -210,6 +210,16 @@ live well below the `copies` profile's 0.6, so a shared cut-off reported almost 
 defaults to 0.35 (`scan`), 0.28 (`diff`), 0.30 (`review`). Precision calibration is not offered: it depends
 on how common clones are in the corpus, which differs from any benchmark.
 
+With code embeddings (MiniLM, `--embed minilm`, weight 0.35) the same thresholds move up, measured on the
+fn-* sets: score at 1% FPR 0.27 -> 0.33 (python) and 0.20-0.27 -> 0.32-0.35 (typescript); at 0.1% FPR
+0.34-0.37 -> 0.39-0.45. `eval-groups` now prints `dataset_threshold` lines for this, and the `reimpl`
+defaults add 0.07 when embeddings are on. `copies` thresholds are not changed (they were tuned on judged real
+pairs and no such data exists for the blend).
+
+End-to-end through the Rust path (`eval-groups --embed minilm`, local server): fn-python 0.698 / 0.706 ->
+0.811 / 0.791 and fn-typescript 0.823 / 0.728 -> 0.836 / 0.901 (dev / holdout), i.e. the proposed default
+model reproduces the offline gain inside the shipped scoring code.
+
 ### `--explain`
 
 `scan --pairs --explain` lists, per pair, the literals and calls only one side has and the source lines

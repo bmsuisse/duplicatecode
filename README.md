@@ -51,7 +51,8 @@ duplicatecode find "retry with exponential backoff" src/   # does something like
   units mixed in, 82% first and 96% in the top 3 (every query within the top 10).
 - Default thresholds depend on the profile: `copies` keeps its tuned 0.6 (`scan`), 0.4 (`diff`), 0.45
   (`review`); `reimpl` scores live lower, so it defaults to 0.35 / 0.28 / 0.30, which correspond to roughly
-  0.1% / 1% false-positive rates on unrelated code in the benchmarks.
+  0.1% / 1% false-positive rates on unrelated code in the benchmarks. With `--embed` the `reimpl`
+  defaults rise by 0.07 because blended scores of unrelated code rise too.
 
 ## Embeddings (bring your own key)
 

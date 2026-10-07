@@ -180,14 +180,27 @@ enum Command {
 }
 
 impl Profile {
-    fn default_threshold(self, command: Command) -> f64 {
+    /// `embedded`: whole-unit embeddings are blended in, which raises the score of unrelated code
+    /// too (measured with MiniLM: score at 1% / 0.1% false-positive rate goes from ~0.27 / 0.35 to
+    /// ~0.33 / 0.42), so the `reimpl` defaults move up with it. `copies` thresholds were tuned on
+    /// judged real pairs and are left alone.
+    fn default_threshold(self, command: Command, embedded: bool) -> f64 {
         match (self, command) {
             (Profile::Copies, Command::Diff) => 0.4,
             (Profile::Copies, Command::Review) => 0.45,
             (Profile::Copies, Command::Scan) => 0.6,
-            (Profile::Reimpl, Command::Diff) => 0.28,
-            (Profile::Reimpl, Command::Review) => 0.3,
-            (Profile::Reimpl, Command::Scan) => 0.35,
+            (Profile::Reimpl, command) => {
+                let base = match command {
+                    Command::Diff => 0.28,
+                    Command::Review => 0.3,
+                    Command::Scan => 0.35,
+                };
+                if embedded {
+                    base + 0.07
+                } else {
+                    base
+                }
+            }
         }
     }
 
@@ -516,7 +529,8 @@ fn main() -> Result<()> {
             min_lines,
             json,
         } => {
-            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Diff));
+            let threshold =
+                threshold.unwrap_or(profile.default_threshold(Command::Diff, embed.code_enabled()));
             let text = if diff == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s)?;
@@ -588,7 +602,8 @@ fn main() -> Result<()> {
             preview_lines,
             profile,
         } => {
-            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Review));
+            let threshold = threshold
+                .unwrap_or(profile.default_threshold(Command::Review, embed.code_enabled()));
             let mut units = Vec::new();
             let mut src = std::collections::HashMap::new();
             for p in &paths {
@@ -797,7 +812,8 @@ fn main() -> Result<()> {
             fail_on_found,
             json,
         } => {
-            let threshold = threshold.unwrap_or(profile.default_threshold(Command::Scan));
+            let threshold =
+                threshold.unwrap_or(profile.default_threshold(Command::Scan, embed.code_enabled()));
             let mut units = Vec::new();
             for p in &paths {
                 for mut u in load_units_with(p, &exclude) {

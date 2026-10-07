@@ -48,7 +48,19 @@ fn group_of(u: &Unit) -> &str {
     u.file.split('/').next().unwrap_or("")
 }
 
+/// Score above which only `fpr` of the negative pairs lie.
+fn score_at_fpr(scores: &[(f64, bool)], fpr: f64) -> f64 {
+    let mut neg: Vec<f64> = scores.iter().filter(|s| !s.1).map(|s| s.0).collect();
+    neg.sort_by(|a, b| a.total_cmp(b));
+    neg.get(((1.0 - fpr) * neg.len() as f64) as usize)
+        .or(neg.last())
+        .copied()
+        .unwrap_or(f64::NAN)
+}
+
 struct Report {
+    thr1: f64,
+    thr01: f64,
     auc: f64,
     tpr1: f64,
     tpr5: f64,
@@ -77,6 +89,8 @@ fn evaluate(units: &[Unit], pick: Pick, all: &[Vec<Scores>]) -> Report {
         hit += best.is_some_and(|b| b.1) as usize;
     }
     Report {
+        thr1: score_at_fpr(&pairs, 0.01),
+        thr01: score_at_fpr(&pairs, 0.001),
         auc: auc(&pairs),
         tpr1: tpr_at_fpr(&pairs, 0.01),
         tpr5: tpr_at_fpr(&pairs, 0.05),
@@ -176,6 +190,10 @@ pub fn run(
             }
             if label == "combined" {
                 headline.push((name.clone(), (r.auc + r.tpr1) / 2.0));
+                println!(
+                    "dataset_threshold {name} score@FPR1%={:.3} score@FPR0.1%={:.3}",
+                    r.thr1, r.thr01
+                );
             }
         }
     }

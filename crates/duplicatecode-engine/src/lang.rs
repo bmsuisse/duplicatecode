@@ -8,6 +8,7 @@ pub enum Lang {
     Tsx,
     #[serde(rename = "csharp")]
     CSharp,
+    Sql,
 }
 
 impl Lang {
@@ -15,8 +16,10 @@ impl Lang {
         match path.extension()?.to_str()? {
             "py" => Some(Lang::Python),
             "ts" | "mts" | "cts" => Some(Lang::TypeScript),
-            "tsx" => Some(Lang::Tsx),
+            // plain JavaScript uses the TSX grammar: it parses JSX, which the TypeScript grammar does not
+            "tsx" | "jsx" | "js" | "mjs" | "cjs" => Some(Lang::Tsx),
             "cs" => Some(Lang::CSharp),
+            "sql" => Some(Lang::Sql),
             _ => None,
         }
     }
@@ -27,6 +30,7 @@ impl Lang {
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
 
@@ -36,6 +40,7 @@ impl Lang {
             Lang::Python => "python",
             Lang::TypeScript | Lang::Tsx => "typescript",
             Lang::CSharp => "csharp",
+            Lang::Sql => "sql",
         }
     }
 }

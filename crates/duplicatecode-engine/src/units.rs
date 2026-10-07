@@ -8,6 +8,15 @@ use tree_sitter::{Node, Parser};
 
 pub const KGRAM: usize = 4;
 
+/// One normalized statement of a unit.
+#[derive(Clone, Copy, Debug)]
+pub struct FragStmt {
+    pub hash: u64,
+    pub tokens: u32,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Unit {
     pub file: String,
@@ -57,6 +66,15 @@ pub struct Unit {
     pub name_vec: Option<std::sync::Arc<[f32]>>,
     #[serde(skip)]
     pub name_parts: BTreeSet<String>,
+    /// Normalized statements in source order (for fragment-level clone search).
+    #[serde(skip)]
+    pub frag: Vec<FragStmt>,
+    /// Source text of the unit (embedded as a whole when code embeddings are enabled).
+    #[serde(skip)]
+    pub text: std::sync::Arc<str>,
+    /// Unit-length embedding of `text` (only when code embeddings are enabled).
+    #[serde(skip)]
+    pub vec: Option<std::sync::Arc<[f32]>>,
 }
 
 impl Unit {
@@ -65,7 +83,28 @@ impl Unit {
     }
 }
 
+/// Tree walks recurse once per nesting level, so one deeply nested expression (hundreds of
+/// thousands of parentheses in a generated file) would overflow the default stack and abort the
+/// whole scan. Run the extraction on a thread with a large stack instead.
+fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn_scoped(scope, f)
+        {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            Err(e) => panic!("cannot start the extraction thread: {e}"),
+        }
+    })
+}
+
 pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
+    on_big_stack(|| extract_units_inner(file, lang, source))
+}
+
+fn extract_units_inner(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
         return Vec::new();
@@ -75,6 +114,8 @@ pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     };
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        local: sql_locals(lang, tree.root_node(), source.as_bytes()),
+        keep_output: false,
         file,
         lang,
         src: source.as_bytes(),
@@ -95,23 +136,366 @@ struct Features {
 
 /// The whole file as a single unit (all top-level and nested code together).
 pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
+    on_big_stack(|| extract_file_unit_inner(file, lang, source))
+}
+
+fn extract_file_unit_inner(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let mut parser = Parser::new();
     parser.set_language(&lang.ts_language()).ok()?;
+    let inlined = inline_entry_point(&mut parser, lang, source);
+    let pruned = prune_dead_toplevel(&mut parser, lang, &inlined);
+    let source = pruned.as_str();
     let tree = parser.parse(source, None)?;
     let mut units = Vec::new();
     let mut ctx = Ctx {
+        local: sql_locals(lang, tree.root_node(), source.as_bytes()),
+        keep_output: true,
         file,
         lang,
         src: source.as_bytes(),
         units: &mut units,
     };
-    let stem = file.rsplit('/').next().unwrap_or(file);
-    let stem = stem.split('.').next().unwrap_or(stem).to_string();
-    ctx.emit("file", stem, tree.root_node());
+    ctx.emit("file", file_stem(file), tree.root_node());
     units.pop()
 }
 
+/// Expression without side effects: literals, names, operators over them, containers of them and
+/// calls to a few pure builtins (`float('inf')`).
+fn is_pure_expr(node: Node, src: &[u8]) -> bool {
+    const PURE_CALLS: &[&str] = &[
+        "int", "float", "str", "bool", "list", "set", "dict", "tuple", "range",
+    ];
+    match node.kind() {
+        "integer"
+        | "float"
+        | "string"
+        | "true"
+        | "false"
+        | "none"
+        | "null"
+        | "number"
+        | "template_string"
+        | "identifier"
+        | "unary_operator"
+        | "binary_operator"
+        | "unary_expression"
+        | "binary_expression"
+        | "parenthesized_expression"
+        | "tuple"
+        | "list"
+        | "dictionary"
+        | "set"
+        | "pair"
+        | "array"
+        | "object"
+        | "string_content"
+        | "string_start"
+        | "string_end"
+        | "escape_sequence" => node
+            .named_children(&mut node.walk())
+            .all(|c| is_pure_expr(c, src)),
+        "call" => {
+            let f = node.child_by_field_name("function");
+            let name = f.and_then(|f| f.utf8_text(src).ok()).unwrap_or("");
+            PURE_CALLS.contains(&name)
+                && node.child_by_field_name("arguments").is_none_or(|a| {
+                    a.named_children(&mut a.walk())
+                        .all(|c| is_pure_expr(c, src))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Whole-file Python scripts: `sys.setrecursionlimit(..)` and rebinding aliases such as
+/// `input = sys.stdin.readline` say nothing about the algorithm.
+fn is_script_noise(node: Node, lang: Lang, src: &[u8]) -> bool {
+    let text = |n: Node| n.utf8_text(src).unwrap_or("");
+    if lang != Lang::Python || node.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(e) = node.named_child(0) else {
+        return false;
+    };
+    match e.kind() {
+        "call" => e
+            .child_by_field_name("function")
+            .is_some_and(|f| text(f) == "sys.setrecursionlimit"),
+        // `input = sys.stdin.readline` at module level; inside a function `x = o.val` is real code
+        "assignment" if node.parent().is_some_and(|p| p.kind() == "module") => {
+            let (l, r) = (
+                e.child_by_field_name("left"),
+                e.child_by_field_name("right"),
+            );
+            l.is_some_and(|l| l.kind() == "identifier")
+                && r.is_some_and(|r| r.kind() == "attribute" && !text(r).contains(['(', '[']))
+        }
+        _ => false,
+    }
+}
+
+/// Names a top-level statement introduces (function/class names, import bindings); empty when the
+/// statement must be kept (executable code, wildcard imports, ...).
+fn defined_names(node: Node, lang: Lang, src: &[u8]) -> Vec<String> {
+    let text = |n: Node| n.utf8_text(src).unwrap_or("").to_string();
+    let field = |n: Node, f: &str| n.child_by_field_name(f).map(text);
+    match (lang, node.kind()) {
+        (
+            _,
+            "function_definition"
+            | "class_definition"
+            | "function_declaration"
+            | "class_declaration",
+        ) => field(node, "name").into_iter().collect(),
+        (Lang::Python, "decorated_definition") => node
+            .child_by_field_name("definition")
+            .map(|d| defined_names(d, lang, src))
+            .unwrap_or_default(),
+        // `MOD = 10**9 + 7` / `INF = float('inf')`: pure module-level constants nobody reads
+        (Lang::Python, "expression_statement") => node
+            .named_child(0)
+            .filter(|c| c.kind() == "assignment")
+            .and_then(|a| {
+                let l = a.child_by_field_name("left")?;
+                let r = a.child_by_field_name("right")?;
+                (l.kind() == "identifier" && is_pure_expr(r, src)).then(|| vec![text(l)])
+            })
+            .unwrap_or_default(),
+        (Lang::Python, "import_statement" | "import_from_statement") => {
+            if node
+                .children(&mut node.walk())
+                .any(|c| c.kind() == "wildcard_import")
+            {
+                return Vec::new();
+            }
+            let mut cur = node.walk();
+            node.children_by_field_name("name", &mut cur)
+                .flat_map(|n| {
+                    if n.kind() == "aliased_import" {
+                        field(n, "alias")
+                    } else {
+                        text(n).split('.').next().map(str::to_string)
+                    }
+                })
+                .collect()
+        }
+        (Lang::TypeScript | Lang::Tsx, "lexical_declaration") => {
+            let mut cur = node.walk();
+            let mut out = Vec::new();
+            for d in node.named_children(&mut cur) {
+                let removable = d.child_by_field_name("value").is_some_and(|v| {
+                    matches!(v.kind(), "arrow_function" | "function_expression")
+                        || is_pure_expr(v, src)
+                });
+                match (removable, field(d, "name")) {
+                    (true, Some(n)) => out.push(n),
+                    _ => return Vec::new(), // top-level state/side effects stay
+                }
+            }
+            out
+        }
+        (Lang::TypeScript | Lang::Tsx, "import_statement") => descendants(node)
+            .filter(|n| n.kind() == "identifier")
+            .map(text)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Python: `def main(): <body>` called once from top level (directly or under
+/// `if __name__ == "__main__":`) is the same program as `<body>` at top level, so inline it.
+fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
+    if lang != Lang::Python {
+        return source.to_string();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return source.to_string();
+    };
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    let text = |n: Node| n.utf8_text(src).unwrap_or("");
+    let is_bare_call = |n: Node, name: &str| {
+        n.kind() == "expression_statement"
+            && n.named_child(0).is_some_and(|c| {
+                c.kind() == "call"
+                    && c.child_by_field_name("function")
+                        .is_some_and(|f| text(f) == name)
+                    && c.child_by_field_name("arguments")
+                        .is_some_and(|a| a.named_child_count() == 0)
+            })
+    };
+    let idents = identifier_leaves(root, src);
+    for def in root.named_children(&mut root.walk()) {
+        if def.kind() != "function_definition" {
+            continue;
+        }
+        let (Some(name), Some(params), Some(body)) = (
+            def.child_by_field_name("name"),
+            def.child_by_field_name("parameters"),
+            def.child_by_field_name("body"),
+        ) else {
+            continue;
+        };
+        let name = text(name);
+        if params.named_child_count() != 0 {
+            continue;
+        }
+        // all identifier uses of the name: the definition plus exactly one top-level call
+        if idents.iter().filter(|(t, _)| *t == name).count() != 2 {
+            continue;
+        }
+        // the call, bare or as the only statement of a `__name__ == "__main__"` guard
+        let mut call_range = None;
+        for st in root.named_children(&mut root.walk()) {
+            let guarded = st.kind() == "if_statement"
+                && st.child_by_field_name("alternative").is_none()
+                && st.child_by_field_name("condition").is_some_and(|c| {
+                    let t = text(c);
+                    t.contains("__name__") && t.contains("__main__") && !t.contains("!=")
+                })
+                && st
+                    .child_by_field_name("consequence")
+                    .filter(|b| b.named_child_count() == 1)
+                    .and_then(|b| b.named_child(0))
+                    .is_some_and(|c| is_bare_call(c, name));
+            if is_bare_call(st, name) || guarded {
+                call_range = Some((st.start_byte(), st.end_byte()));
+            }
+        }
+        let Some((cs, ce)) = call_range else { continue };
+        if cs < def.end_byte() {
+            continue; // call before the definition: keep the order as written
+        }
+        // dedent the body by the indentation of its first line
+        let first = body.start_position().column;
+        let body_text = &source[body.start_byte() - first..body.end_byte()];
+        let dedented: String = body_text
+            .lines()
+            // strip at most the body's indentation: a continuation line of a multi-line string
+            // that starts further left keeps its text
+            .map(|l| &l[(l.len() - l.trim_start().len()).min(first)..])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = String::with_capacity(source.len());
+        out.push_str(&source[..def.start_byte()]);
+        out.push_str(&dedented);
+        out.push_str(&source[def.end_byte()..cs]);
+        out.push_str(&source[ce..]);
+        return out;
+    }
+    source.to_string()
+}
+
+/// Blank out top-level functions, classes and imports that nothing else in the file references
+/// (competitive-programming templates, unused helpers), repeating until nothing more is dead, so
+/// that whole-file comparison looks at the code that actually runs. Line structure is kept.
+fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String {
+    let mut cur = source.to_string();
+    for _ in 0..4 {
+        let Some(tree) = parser.parse(&cur, None) else {
+            break;
+        };
+        let src = cur.as_bytes();
+        let root = tree.root_node();
+        // byte offsets of every identifier occurrence, by name
+        let mut occurrences: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+        for (t, at) in identifier_leaves(root, src) {
+            occurrences.entry(t).or_default().push(at);
+        }
+        let mut dead: Vec<(usize, usize)> = Vec::new();
+        for c in root.named_children(&mut root.walk()) {
+            if is_script_noise(c, lang, src) {
+                dead.push((c.start_byte(), c.end_byte()));
+                continue;
+            }
+            let names = defined_names(c, lang, src);
+            if names.is_empty() {
+                continue;
+            }
+            let span = c.start_byte()..c.end_byte();
+            let used = names.iter().any(|name| {
+                occurrences
+                    .get(name.as_str())
+                    .is_some_and(|at| at.iter().any(|a| !span.contains(a)))
+            });
+            if !used {
+                dead.push((c.start_byte(), c.end_byte()));
+            }
+        }
+        if dead.is_empty() {
+            break;
+        }
+        let mut bytes = cur.into_bytes();
+        for (a, b) in dead {
+            for x in &mut bytes[a..b] {
+                if *x != b'\n' {
+                    *x = b' ';
+                }
+            }
+        }
+        cur = String::from_utf8(bytes).unwrap_or_default();
+    }
+    cur
+}
+
+/// `dir/permissions_report.sql` -> `permissions_report`.
+fn file_stem(file: &str) -> String {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    name.split('.').next().unwrap_or(name).to_string()
+}
+
+/// Every node below (and including) `root`, in pre-order.
+fn descendants(root: Node) -> impl Iterator<Item = Node> {
+    let mut stack = vec![root];
+    std::iter::from_fn(move || {
+        let n = stack.pop()?;
+        let mut kids: Vec<_> = n.children(&mut n.walk()).collect();
+        kids.reverse();
+        stack.extend(kids);
+        Some(n)
+    })
+}
+
+/// Every identifier leaf below `root` as (text, byte offset).
+fn identifier_leaves<'a>(root: Node<'a>, src: &'a [u8]) -> Vec<(&'a str, usize)> {
+    descendants(root)
+        .filter(|n| n.child_count() == 0 && n.kind().ends_with("identifier"))
+        .map(|n| (n.utf8_text(src).unwrap_or(""), n.start_byte()))
+        .collect()
+}
+
+fn strip_quotes(t: &str) -> &str {
+    t.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
+}
+
+/// Lower-cased, unquoted text of an SQL name node.
+fn sql_name(n: Node, src: &[u8]) -> String {
+    strip_quotes(n.utf8_text(src).unwrap_or("")).to_lowercase()
+}
+
+/// Alias and CTE names of a SQL file (lower-cased).
+fn sql_locals(lang: Lang, root: Node, src: &[u8]) -> std::collections::HashSet<String> {
+    if lang != Lang::Sql {
+        return Default::default();
+    }
+    descendants(root)
+        .flat_map(|n| {
+            let alias = n.child_by_field_name("alias");
+            let cte = (n.kind() == "cte")
+                .then(|| n.named_child(0).filter(|c| c.kind() == "identifier"))
+                .flatten();
+            [alias, cte]
+        })
+        .flatten()
+        .map(|n| sql_name(n, src))
+        .collect()
+}
+
 struct Ctx<'a> {
+    /// SQL: lower-cased alias and CTE names; they are abstracted like local variables.
+    local: std::collections::HashSet<String>,
+    /// Whole-file (script) mode: print/console output is the program's result, not debug noise.
+    keep_output: bool,
     file: &'a str,
     lang: Lang,
     src: &'a [u8],
@@ -167,6 +551,17 @@ impl Ctx<'_> {
     fn classify<'t>(&self, node: Node<'t>) -> Option<(&'static str, String, Node<'t>)> {
         let field_name = |n: Node| n.child_by_field_name("name").map(|x| self.text(x));
         match (self.lang, node.kind()) {
+            (Lang::Sql, "statement") => {
+                // DDL/DML statements are named after their target (checked first so queries skip the
+                // tree walk); a plain query is named like its file, as a view is: giving every
+                // SELECT the same name would make any two queries look alike by name
+                let name = node
+                    .named_child(0)
+                    .filter(|c| c.kind().starts_with("create") || c.kind().starts_with("insert"))
+                    .and_then(|_| descendants(node).find(|n| n.kind() == "object_reference"))
+                    .map_or_else(|| file_stem(self.file), |o| sql_name(o, self.src));
+                Some(("statement", name, node))
+            }
             (Lang::Python, "function_definition") => Some(("function", field_name(node)?, node)),
             (Lang::Python, "class_definition") => Some(("class", field_name(node)?, node)),
             (_, "function_declaration" | "generator_function_declaration") => {
@@ -241,6 +636,15 @@ impl Ctx<'_> {
         let fingerprint2 = kgram_hashes(&tokens, 2);
         let mut stmts = Vec::new();
         self.statements(node, &mut stmts);
+        let frag = stmts
+            .iter()
+            .map(|st| FragStmt {
+                hash: hash_of(&st.tokens),
+                tokens: st.tokens.len() as u32,
+                start: st.lines.0,
+                end: st.lines.1,
+            })
+            .collect();
         let mut stmts_exact = BTreeMap::new();
         let mut stmts_shape = BTreeMap::new();
         let mut shape_seq = Vec::new();
@@ -276,6 +680,9 @@ impl Ctx<'_> {
             lines: (node.end_position().row - node.start_position().row + 1) as u32,
             name_vec: None,
             name_parts,
+            frag,
+            text: node.utf8_text(self.src).unwrap_or("").into(),
+            vec: None,
         });
     }
 
@@ -337,7 +744,11 @@ impl Ctx<'_> {
         let kind = node.kind();
         TYPE_KINDS.contains(&kind)
             || (self.lang == Lang::Python && kind == "expression_statement" && is_docstring(node))
-            || self.is_debug(node)
+            || if self.keep_output {
+                is_script_noise(node, self.lang, self.src)
+            } else {
+                self.is_debug(node)
+            }
     }
 
     fn is_debug(&self, node: Node) -> bool {
@@ -462,6 +873,7 @@ impl Ctx<'_> {
             return;
         }
         match kind {
+            _ if self.lang == Lang::Sql && node.child_count() == 0 => self.sql_leaf(node, out),
             "string"
             | "template_string"
             | "string_literal"
@@ -523,7 +935,7 @@ impl Ctx<'_> {
                     if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
                         out.push("return".into());
                         self.norm_tokens(v, out, skip_blocks);
-                        if self.lang != Lang::Python {
+                        if self.lang == Lang::CSharp {
                             out.push(";".into());
                         }
                         i += 2;
@@ -533,9 +945,95 @@ impl Ctx<'_> {
                     i += 1;
                 }
             }
+            // statement terminators are optional in JS/TS (ASI): `a=1;` and `a=1` are the same code
+            ";" if matches!(self.lang, Lang::TypeScript | Lang::Tsx) => {}
+            // block braces are optional around single statements
+            "{" | "}"
+                if matches!(self.lang, Lang::TypeScript | Lang::Tsx)
+                    && node.parent().is_some_and(|p| p.kind() == "statement_block") => {}
             _ if node.child_count() == 0 => out.push(norm_leaf(kind).to_string()),
             _ => self.norm_children(node, out, skip_blocks),
         }
+    }
+
+    /// SQL leaves: keywords lower-cased, aliases/CTE names/qualifiers abstracted, and table,
+    /// column and function names kept (in SQL they are the semantics).
+    fn sql_leaf(&self, node: Node, out: &mut Vec<String>) {
+        let kind = node.kind();
+        if let Some(k) = kind.strip_prefix("keyword_") {
+            out.push(k.to_string());
+            return;
+        }
+        match kind {
+            "identifier" => {
+                let low = sql_name(node, self.src);
+                let qualifier = node.parent().is_some_and(|p| {
+                    p.kind() == "object_reference"
+                        && p.parent().is_some_and(|g| g.kind() == "field")
+                });
+                if qualifier || self.local.contains(&low) {
+                    out.push("ID".into());
+                } else {
+                    out.push(low);
+                }
+            }
+            "literal" => {
+                let t = self.text(node);
+                let first = t.chars().next().unwrap_or(' ');
+                if first.is_ascii_digit() || first == '-' || first == '.' {
+                    out.push("NUM".into());
+                } else if first == '\'' || first == '"' {
+                    out.push("STR".into());
+                } else {
+                    out.push(t.to_lowercase());
+                }
+            }
+            ";" => {} // statement terminators carry no meaning
+            _ => out.push(norm_leaf(kind).to_string()),
+        }
+    }
+
+    /// SQL features (callees, referenced tables/columns, literals); true = do not descend.
+    fn sql_features(&self, node: Node, f: &mut Features) -> bool {
+        let name_of = |n: Node| sql_name(n, self.src);
+        // the referenced name of an invocation/relation: its leading object_reference
+        let target = || {
+            node.named_child(0)
+                .filter(|c| c.kind() == "object_reference")
+                .map(name_of)
+        };
+        match node.kind() {
+            "invocation" => {
+                if let Some(n) = target() {
+                    f.api.insert(n.clone());
+                    f.callees.insert(n);
+                }
+            }
+            "relation" => {
+                if let Some(n) = target().filter(|n| !self.local.contains(n)) {
+                    f.api.insert(n);
+                }
+            }
+            "field" => {
+                if let Some(n) = node
+                    .child_by_field_name("name")
+                    .map(name_of)
+                    .filter(|n| !self.local.contains(n))
+                {
+                    f.api.insert(n);
+                }
+            }
+            "literal" => {
+                let t = self.text(node);
+                let t = strip_quotes(&t);
+                if !t.is_empty() && t.len() <= 24 && !matches!(t, "0" | "1" | "2" | "-1") {
+                    f.literals.insert(t.to_lowercase());
+                }
+                return true;
+            }
+            _ => {}
+        }
+        false
     }
 
     fn norm_children(&self, node: Node, out: &mut Vec<String>, skip_blocks: bool) {
@@ -612,7 +1110,8 @@ impl Ctx<'_> {
         let blockish = matches!(
             node.kind(),
             "block" | "statement_block" | "module" | "program" | "compilation_unit"
-        );
+        ) || (self.lang == Lang::Sql
+            && matches!(node.kind(), "statement" | "select" | "from" | "cte"));
         let n = node.child_count();
         let mut i = 0;
         while i < n {
@@ -621,16 +1120,32 @@ impl Ctx<'_> {
                 i += 1;
                 continue;
             }
+            let first = out.len();
+            let span = |a: Node, b: Node| {
+                (
+                    a.start_position().row as u32 + 1,
+                    b.end_position().row as u32 + 1,
+                )
+            };
             if blockish && c.is_named() {
                 if let Some(v) = node.child(i + 1).and_then(|next| self.temp_return(c, next)) {
                     let mut tokens = vec!["return".to_string()];
                     self.norm_tokens(v, &mut tokens, true);
-                    if self.lang != Lang::Python {
+                    if self.lang == Lang::CSharp {
                         tokens.push(";".into());
                     }
                     let mut shape = vec!["return_statement".to_string()];
                     shape.extend(shape_of(v).into_iter().take(3));
-                    out.push(Stmt { tokens, shape });
+                    out.push(Stmt {
+                        lines: (0, 0),
+                        tokens,
+                        shape,
+                    });
+                    if let Some(next) = node.child(i + 1) {
+                        for st in &mut out[first..] {
+                            st.lines = span(c, next);
+                        }
+                    }
                     i += 2;
                     continue;
                 }
@@ -638,6 +1153,7 @@ impl Ctx<'_> {
                     let mut tokens = Vec::new();
                     self.norm_tokens(c, &mut tokens, true);
                     out.push(Stmt {
+                        lines: (0, 0),
                         tokens,
                         shape: shape_of(c),
                     });
@@ -652,9 +1168,29 @@ impl Ctx<'_> {
                 let mut tokens = Vec::new();
                 self.norm_tokens(c, &mut tokens, true);
                 out.push(Stmt {
+                    lines: (0, 0),
                     tokens,
                     shape: vec!["return".into(), shape_of(c).join(">")],
                 });
+            }
+            // tokens of a compound statement are its header only, so its lines are too
+            let header = (
+                c.start_position().row as u32 + 1,
+                match c
+                    .child_by_field_name("body")
+                    .or_else(|| c.child_by_field_name("consequence"))
+                {
+                    Some(b) if b.start_position().row > c.start_position().row => {
+                        b.start_position().row as u32
+                    }
+                    Some(_) => c.start_position().row as u32 + 1,
+                    None => c.end_position().row as u32 + 1,
+                },
+            );
+            for st in &mut out[first..] {
+                if st.lines == (0, 0) {
+                    st.lines = header;
+                }
             }
             self.statements(c, out);
             i += 1;
@@ -703,6 +1239,7 @@ impl Ctx<'_> {
         }
         tokens.extend(["=", "[", "]"].map(String::from));
         out.push(Stmt {
+            lines: (0, 0),
             tokens,
             shape: ["expression_statement", "assignment", "list"]
                 .map(String::from)
@@ -737,12 +1274,17 @@ impl Ctx<'_> {
                 }
                 _ => continue,
             }
-            out.push(Stmt { tokens, shape });
+            out.push(Stmt {
+                lines: (0, 0),
+                tokens,
+                shape,
+            });
         }
         if let Some(body) = comp.child_by_field_name("body") {
             let mut tokens = Vec::new();
             self.append_stmt(comp.kind(), body, &mut tokens);
             out.push(Stmt {
+                lines: (0, 0),
                 tokens,
                 shape: ["expression_statement", "call", "attribute"]
                     .map(String::from)
@@ -751,6 +1293,7 @@ impl Ctx<'_> {
         }
         if is_return {
             out.push(Stmt {
+                lines: (0, 0),
                 tokens: vec!["return".into(), "ID".into()],
                 shape: vec!["return_statement".into()],
             });
@@ -763,6 +1306,9 @@ impl Ctx<'_> {
     fn collect_features(&self, node: Node, f: &mut Features) {
         let kind = node.kind();
         if self.is_ignored(node) {
+            return;
+        }
+        if self.lang == Lang::Sql && self.sql_features(node, f) {
             return;
         }
         match kind {
@@ -865,6 +1411,8 @@ fn norm_leaf(kind: &str) -> &str {
 }
 
 struct Stmt {
+    /// 1-based inclusive source lines of the statement the entry was derived from.
+    lines: (u32, u32),
     tokens: Vec<String>,
     /// Coarse kind path, e.g. [expression_statement, assignment, call].
     shape: Vec<String>,
@@ -959,6 +1507,148 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attribute_reads_inside_functions_are_not_script_noise() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let with_read =
+            f("def f(o):\n    x = o.val\n    y = x * 2\n    return y + 1\nprint(f(1))\n");
+        let without = f("def f(o):\n    y = o * 2\n    return y + 1\nprint(f(1))\n");
+        assert_ne!(
+            with_read, without,
+            "x = o.val is real code inside a function"
+        );
+        // the module-level alias is still ignored
+        let alias = f("import sys\ninput = sys.stdin.readline\nn = int(input())\nprint(n)\n");
+        assert_eq!(alias, f("n = int(input())\nprint(n)\n"));
+    }
+
+    #[test]
+    fn plain_sql_queries_are_named_like_their_file() {
+        let name = |file: &str, src: &str| extract_units(file, Lang::Sql, src).remove(0).name;
+        assert_eq!(
+            name("report/sales_by_region.sql", "select a from t;"),
+            "sales_by_region"
+        );
+        assert_eq!(
+            name("v.sql", "create view customer_totals as select 1;"),
+            "customer_totals"
+        );
+        assert_ne!(
+            name("a.sql", "select a from t;"),
+            name("b.sql", "select a from t;")
+        );
+    }
+
+    #[test]
+    fn main_guard_with_else_or_negation_is_not_inlined_and_strings_keep_their_text() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let flat = f("a = int(input())\nprint(a)\n");
+        let with_else = f("def main():\n    a = int(input())\n    print(a)\n\nif __name__ == '__main__':\n    main()\nelse:\n    z = foo(1)\n    bar(z)\n");
+        assert_ne!(flat, with_else, "the else branch must survive");
+        let negated = f("def main():\n    a = int(input())\n    print(a)\n\nif __name__ != '__main__':\n    main()\n");
+        assert_ne!(flat, negated);
+        // a multi-line string inside main() keeps its continuation lines
+        let s = f("def main():\n    s = \"\"\"abc\ndefgh\nij\"\"\"\n    print(s)\nmain()\n");
+        assert_eq!(s, f("s = \"\"\"abc\ndefgh\nij\"\"\"\nprint(s)\n"));
+    }
+
+    #[test]
+    fn deeply_nested_input_does_not_overflow_the_stack() {
+        let depth = 30_000;
+        let sql = format!("select {}1{} from t;", "(".repeat(depth), ")".repeat(depth));
+        let _ = extract_units("deep.sql", Lang::Sql, &sql);
+        let py = format!("x = {}1{}\n", "(".repeat(depth), ")".repeat(depth));
+        let _ = extract_units("deep.py", Lang::Python, &py);
+    }
+
+    #[test]
+    fn a_compound_statement_spans_only_its_header() {
+        let u = extract_units(
+            "a.py",
+            Lang::Python,
+            "def f(x):\n    if x and x > 1:\n        a = 1\n        b = 2\n    return x\n",
+        )
+        .remove(0);
+        let header = u
+            .frag
+            .iter()
+            .find(|s| s.start == 2)
+            .expect("the if statement");
+        assert_eq!(
+            header.end, 2,
+            "the body lines belong to the statements inside it"
+        );
+    }
+
+    #[test]
+    fn react_components_in_plain_js_files_are_parsed() {
+        let path = std::path::Path::new("Card.js");
+        let lang = Lang::from_path(path).unwrap();
+        let src = "export function Card(props) { const t = props.title; return <div>{t}</div>; }\n";
+        assert_eq!(extract_units("Card.js", lang, src).len(), 1);
+    }
+
+    #[test]
+    fn python_script_noise_is_ignored_in_file_units() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let plain = f("n = int(input())\nprint(n)\n");
+        let noisy = f("import sys\nsys.setrecursionlimit(10**6)\ninput = sys.stdin.readline\nn = int(input())\nprint(n)\n");
+        assert_eq!(plain, noisy);
+    }
+
+    #[test]
+    fn python_main_wrapper_equals_top_level_code() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let flat = f("n = int(input())\nprint(n * 2)\n");
+        let wrapped = f("def main():\n    n = int(input())\n    print(n * 2)\n\nif __name__ == '__main__':\n    main()\n");
+        let called = f("def solve():\n    n = int(input())\n    print(n * 2)\n\nsolve()\n");
+        assert_eq!(flat, wrapped);
+        assert_eq!(flat, called);
+        // functions with parameters or used twice are real functions, not entry points
+        assert_ne!(flat, f("def main(x):\n    print(x)\n\nmain(1)\n"));
+        assert_ne!(
+            flat,
+            f("def main():\n    n = int(input())\n    print(n * 2)\n\nmain()\nmain()\n")
+        );
+    }
+
+    #[test]
+    fn sql_ignores_case_aliases_and_formatting_but_not_tables() {
+        let f = |src: &str| extract_file_unit("q.sql", Lang::Sql, src).unwrap().tokens;
+        let a = f("SELECT o.id, SUM(i.amt) AS total FROM orders o JOIN items i ON o.id = i.oid WHERE o.status = 'x' GROUP BY o.id;");
+        let b = f("select\n  a.id,\n  sum(b.amt) as t\nfrom orders a\njoin items b on a.id = b.oid\nwhere a.status = 'y'\ngroup by a.id");
+        assert_eq!(a, b);
+        let c = f("SELECT o.id, SUM(i.amt) AS total FROM invoices o JOIN items i ON o.id = i.oid WHERE o.status = 'x' GROUP BY o.id;");
+        assert_ne!(a, c);
+        let u = extract_units(
+            "q.sql",
+            Lang::Sql,
+            "SELECT 1 FROM t;\nCREATE VIEW v AS SELECT a FROM t;",
+        );
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[1].name, "v");
+    }
+
+    #[test]
+    fn file_unit_ignores_unused_helpers_and_imports() {
+        let core = "def main():\n    s = input()\n    print(s[::-1])\n\nmain()\n";
+        let noisy = format!(
+            "import math\nfrom heapq import heappush\n\ndef gcd(a, b):\n    return a if not b else gcd(b, a % b)\n\n\
+             def lcm(a, b):\n    return a * b // gcd(a, b)\n\n{core}"
+        );
+        let a = extract_file_unit("a.py", Lang::Python, core).unwrap();
+        let b = extract_file_unit("b.py", Lang::Python, &noisy).unwrap();
+        assert_eq!(a.tokens, b.tokens);
+        // helpers that are used stay
+        let used = "def f(x):\n    return x + 1\n\nprint(f(2))\n";
+        let u = extract_file_unit("c.py", Lang::Python, used).unwrap();
+        assert!(u.tokens.len() > 8);
+        let js = "import fs from 'fs';\nconst unused = () => 1;\nconsole.log(2);\n";
+        let j = extract_file_unit("a.js", Lang::TypeScript, js).unwrap();
+        let j2 = extract_file_unit("b.js", Lang::TypeScript, "console.log(2);\n").unwrap();
+        assert_eq!(j.tokens, j2.tokens);
+    }
+
     use super::*;
 
     #[test]

@@ -1,7 +1,10 @@
 //! Scoring and matching of query units against a corpus.
 
-use crate::similarity::{containment, cosine, jaccard, lcs_ratio, multiset_dice};
+use crate::similarity::{
+    containment, cosine, dot, jaccard, lcs_ratio, multiset_dice, weighted_jaccard,
+};
 use crate::units::Unit;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Scores {
@@ -27,6 +30,8 @@ pub struct Scores {
     pub stmt_shape: f64,
     /// Order-aware alignment (LCS) of statement shapes.
     pub stmt_lcs: f64,
+    /// Cosine of the whole-unit code embeddings; 0 when either side has none.
+    pub embed: f64,
     pub combined: f64,
 }
 
@@ -44,11 +49,25 @@ impl Scores {
             self.stmt_exact,
             self.stmt_shape,
             self.stmt_lcs,
+            self.containment,
+            self.embed,
         ]
     }
 }
 
-pub const N_FEATURES: usize = 10;
+pub const N_FEATURES: usize = 12;
+const FEAT_STRUCTURAL: usize = 0;
+const FEAT_LOOSE: usize = 1;
+const FEAT_KINDS: usize = 2;
+const FEAT_LITERALS: usize = 3;
+const FEAT_API: usize = 4;
+const FEAT_NAME: usize = 5;
+const FEAT_CALLEES: usize = 6;
+const FEAT_STMT_EXACT: usize = 7;
+const FEAT_STMT_SHAPE: usize = 8;
+const FEAT_STMT_LCS: usize = 9;
+const FEAT_CONTAINMENT: usize = 10;
+const FEAT_EMBED: usize = 11;
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "structural",
     "loose",
@@ -60,6 +79,8 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "stmt_exact",
     "stmt_shape",
     "stmt_lcs",
+    "containment",
+    "embed",
 ];
 
 /// Linear scoring weights (bias first); fitted by `duplicatecode bench --fit`.
@@ -69,6 +90,57 @@ pub struct Weights {
     pub w: [f64; N_FEATURES],
     /// Embedding cosine at/below which two names count as unrelated (scaled to 0 at the floor, 1 at 1.0).
     pub name_floor: f64,
+    /// Replacement weights for SQL, whose clones are best told apart by loose n-grams, referenced
+    /// tables/columns and literals rather than by exact 4-gram structure.
+    pub sql: Option<[f64; N_FEATURES]>,
+    /// Replacement weights for whole-file units (scripts): their names carry no information.
+    pub file: Option<[f64; N_FEATURES]>,
+    /// Leave out literals/api/callees when neither side has any and spread their weight over the
+    /// rest, so structurally identical code without literals is not penalized.
+    pub renormalize: bool,
+}
+
+impl Weights {
+    /// Give the code-embedding cosine weight `lambda` and scale every other weight by `1 - lambda`
+    /// (also in the file/SQL overrides). Units without vectors skip the feature (see `renormalize`).
+    pub fn with_embed(&self, lambda: f64) -> Weights {
+        let mix = |w: [f64; N_FEATURES]| {
+            let mut o = w.map(|x| x * (1.0 - lambda));
+            o[FEAT_EMBED] = lambda;
+            o
+        };
+        Weights {
+            w: mix(self.w),
+            file: self.file.map(mix),
+            sql: self.sql.map(mix),
+            ..*self
+        }
+    }
+
+    /// Factor by which the remaining weights are scaled when `skipped` weight is left out.
+    pub fn renorm_scale(&self, skipped: f64) -> f64 {
+        let total: f64 = self.w.iter().sum();
+        if total - skipped > 1e-9 {
+            total / (total - skipped)
+        } else {
+            1.0
+        }
+    }
+
+    /// The weights to use when comparing units like `u`.
+    pub fn for_unit(&self, u: &Unit) -> Weights {
+        let over = match (u.lang, u.kind.as_str()) {
+            (crate::lang::Lang::Sql, _) => self.sql,
+            (_, "file") => self.file,
+            _ => None,
+        };
+        over.map_or(*self, |w| Weights {
+            w,
+            sql: None,
+            file: None,
+            ..*self
+        })
+    }
 }
 
 impl Default for Weights {
@@ -76,8 +148,17 @@ impl Default for Weights {
     fn default() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.6, 0.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0, 0.0, 0.0],
+            w: [
+                0.16, 0.03, 0.02, 0.13, 0.23, 0.17, 0.0, 0.0, 0.0, 0.0, 0.26, 0.0,
+            ],
             name_floor: 0.5,
+            renormalize: true,
+            file: Some([
+                0.58, 0.14, 0.08, 0.06, 0.0, 0.06, 0.06, 0.02, 0.0, 0.0, 0.0, 0.0,
+            ]),
+            sql: Some([
+                0.0, 0.46, 0.0, 0.17, 0.29, 0.02, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ]),
         }
     }
 }
@@ -90,8 +171,13 @@ impl Weights {
     pub fn copies() -> Self {
         Weights {
             bias: 0.0,
-            w: [0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0],
+            w: [
+                0.09, 0.0, 0.0, 0.18, 0.09, 0.36, 0.0, 0.27, 0.0, 0.0, 0.0, 0.0,
+            ],
             name_floor: 0.5,
+            renormalize: false,
+            file: None,
+            sql: None,
         }
     }
 }
@@ -100,44 +186,161 @@ pub fn score(a: &Unit, b: &Unit) -> Scores {
     score_with(a, b, &Weights::default())
 }
 
+/// Inverse document frequency of token n-grams over a set of units: n-grams that occur in most
+/// units (I/O boilerplate, loop headers) say little about whether two units are clones.
+pub struct Idf {
+    fp: HashMap<u64, f64>,
+    fp2: HashMap<u64, f64>,
+}
+
+impl Idf {
+    pub fn from_units(units: &[Unit]) -> Idf {
+        fn table<'a>(
+            sets: impl Iterator<Item = &'a std::collections::BTreeSet<u64>>,
+            n: usize,
+        ) -> HashMap<u64, f64> {
+            let mut df: HashMap<u64, u32> = HashMap::new();
+            for s in sets {
+                for g in s {
+                    *df.entry(*g).or_default() += 1;
+                }
+            }
+            df.into_iter()
+                .map(|(g, d)| (g, (1.0 + n as f64 / d as f64).ln()))
+                .collect()
+        }
+        let n = units.len().max(1);
+        Idf {
+            fp: table(units.iter().map(|u| &u.fingerprint), n),
+            fp2: table(units.iter().map(|u| &u.fingerprint2), n),
+        }
+    }
+}
+
 /// Lexical subword overlap, or — when both names have embeddings — the better of that and the
 /// calibrated embedding cosine (so `pickName` ~ `pickLocalizedLabel` can still register).
 fn name_similarity(a: &Unit, b: &Unit, floor: f64) -> f64 {
     let lexical = jaccard(&a.name_parts, &b.name_parts);
     match (&a.name_vec, &b.name_vec) {
-        (Some(x), Some(y)) if x.len() == y.len() => {
-            let cos: f64 = x
-                .iter()
-                .zip(y.iter())
-                .map(|(p, q)| (*p as f64) * (*q as f64))
-                .sum();
-            lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0))
-        }
+        (Some(x), Some(y)) => match dot(x, y) {
+            Some(cos) => lexical.max(((cos - floor) / (1.0 - floor)).clamp(0.0, 1.0)),
+            None => lexical,
+        },
         _ => lexical,
     }
 }
 
 pub fn score_with(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
+    score_with_idf(a, b, weights, None)
+}
+
+/// Every feature computed (what the benchmarks report per signal).
+pub fn score_with_idf(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>) -> Scores {
+    score_impl(a, b, weights, idf, false)
+}
+
+/// Same `combined` as [`score_with`], but features whose weight is 0 are left at 0 instead of
+/// computed: the search path only needs the blended score.
+pub fn score_lean(a: &Unit, b: &Unit, weights: &Weights) -> Scores {
+    score_impl(a, b, weights, None, true)
+}
+
+fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bool) -> Scores {
+    let weights = &weights.for_unit(a);
+    let need = |feature: usize| !lean || weights.w[feature] > 0.0;
+    let idf_weight = |table: fn(&Idf) -> &HashMap<u64, f64>| {
+        move |g: &u64| idf.and_then(|i| table(i).get(g)).copied().unwrap_or(1.0)
+    };
+    let ngram = |x: &std::collections::BTreeSet<u64>,
+                 y: &std::collections::BTreeSet<u64>,
+                 table: fn(&Idf) -> &HashMap<u64, f64>| match idf {
+        Some(_) => weighted_jaccard(x, y, idf_weight(table)),
+        None => jaccard(x, y),
+    };
     let mut s = Scores {
-        structural: jaccard(&a.fingerprint, &b.fingerprint),
-        loose: jaccard(&a.fingerprint2, &b.fingerprint2),
-        containment: containment(&a.fingerprint, &b.fingerprint),
-        kinds: cosine(&a.kinds, &b.kinds),
-        literals: jaccard(&a.literals, &b.literals),
-        api: jaccard(&a.api, &b.api),
-        name: name_similarity(a, b, weights.name_floor),
-        callees: jaccard(&a.callees, &b.callees),
-        stmt_exact: multiset_dice(&a.stmts_exact, &b.stmts_exact),
-        stmt_shape: multiset_dice(&a.stmts_shape, &b.stmts_shape),
-        stmt_lcs: lcs_ratio(&a.shape_seq, &b.shape_seq),
+        structural: if need(FEAT_STRUCTURAL) {
+            ngram(&a.fingerprint, &b.fingerprint, |i| &i.fp)
+        } else {
+            0.0
+        },
+        loose: if need(FEAT_LOOSE) {
+            ngram(&a.fingerprint2, &b.fingerprint2, |i| &i.fp2)
+        } else {
+            0.0
+        },
+        containment: if need(FEAT_CONTAINMENT) {
+            containment(&a.fingerprint, &b.fingerprint)
+        } else {
+            0.0
+        },
+        kinds: if need(FEAT_KINDS) {
+            cosine(&a.kinds, &b.kinds)
+        } else {
+            0.0
+        },
+        literals: if need(FEAT_LITERALS) {
+            jaccard(&a.literals, &b.literals)
+        } else {
+            0.0
+        },
+        api: if need(FEAT_API) {
+            jaccard(&a.api, &b.api)
+        } else {
+            0.0
+        },
+        name: if need(FEAT_NAME) {
+            name_similarity(a, b, weights.name_floor)
+        } else {
+            0.0
+        },
+        callees: if need(FEAT_CALLEES) {
+            jaccard(&a.callees, &b.callees)
+        } else {
+            0.0
+        },
+        stmt_exact: if need(FEAT_STMT_EXACT) {
+            multiset_dice(&a.stmts_exact, &b.stmts_exact)
+        } else {
+            0.0
+        },
+        stmt_shape: if need(FEAT_STMT_SHAPE) {
+            multiset_dice(&a.stmts_shape, &b.stmts_shape)
+        } else {
+            0.0
+        },
+        stmt_lcs: if need(FEAT_STMT_LCS) {
+            lcs_ratio(&a.shape_seq, &b.shape_seq)
+        } else {
+            0.0
+        },
+        embed: match (&a.vec, &b.vec) {
+            (Some(x), Some(y)) if need(FEAT_EMBED) => dot(x, y).unwrap_or(0.0).clamp(0.0, 1.0),
+            _ => 0.0,
+        },
         combined: 0.0,
     };
-    s.combined = weights.bias
-        + s.features()
-            .iter()
-            .zip(weights.w)
-            .map(|(f, w)| f * w)
-            .sum::<f64>();
+    // Features that neither side has (no literals, no calls, no vector) say nothing: leave them
+    // out and spread their weight over the features that do apply.
+    let mut w = weights.w;
+    if weights.renormalize {
+        let empty = |x: &std::collections::BTreeSet<String>| x.is_empty();
+        for (feature, absent) in [
+            (FEAT_LITERALS, empty(&a.literals) && empty(&b.literals)),
+            (FEAT_API, empty(&a.api) && empty(&b.api)),
+            (FEAT_CALLEES, empty(&a.callees) && empty(&b.callees)),
+        ] {
+            if absent {
+                w[feature] = 0.0;
+            }
+        }
+    }
+    // a unit without a vector has no embedding term, whatever the profile does about the others
+    if a.vec.is_none() || b.vec.is_none() {
+        w[FEAT_EMBED] = 0.0;
+    }
+    let scale = weights.renorm_scale(weights.w.iter().sum::<f64>() - w.iter().sum::<f64>());
+    let sum: f64 = s.features().iter().zip(w).map(|(f, w)| f * w).sum();
+    s.combined = weights.bias + scale * sum;
     s
 }
 
@@ -300,13 +503,33 @@ impl Corpus {
             }
             return out;
         }
-        let (threshold, w) = (opts.threshold, &opts.weights);
-        let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
-        let min_jaccard = if w.w[0] > 0.0 {
-            ((threshold - rest) / w.w[0]).max(0.0)
-        } else {
-            0.0
+        let (threshold, w) = (opts.threshold, &opts.weights.for_unit(q));
+        let all_same_family = || {
+            (0..self.units.len() as u32)
+                .filter(|i| self.units[*i as usize].lang.family() == q.lang.family())
+                .collect()
         };
+        if w.w[FEAT_STRUCTURAL] <= 0.0 {
+            // no exact-4-gram term to bound the score by: every same-family unit is a candidate
+            return all_same_family();
+        }
+        let rest: f64 = w.w[1..].iter().filter(|x| **x > 0.0).sum::<f64>() + w.bias.max(0.0);
+        // features absent on both sides are renormalized away, which can raise a score by at most
+        // `renorm_scale`; bound with it so the prefilter stays exact. A missing vector always drops
+        // the embedding weight.
+        let skippable = w.w[FEAT_EMBED]
+            + if w.renormalize {
+                w.w[FEAT_LITERALS] + w.w[FEAT_API] + w.w[FEAT_CALLEES]
+            } else {
+                0.0
+            };
+        let min_jaccard =
+            ((threshold / w.renorm_scale(skippable) - rest) / w.w[FEAT_STRUCTURAL]).max(0.0);
+        if min_jaccard <= 0.0 {
+            // the other features alone can reach the threshold, so a pair sharing no 4-gram at all
+            // can still match: the k-gram index cannot prune anything
+            return all_same_family();
+        }
         let min_shared = ((min_jaccard * q.fingerprint.len() as f64).ceil() as u32).max(1);
         let mut counts: std::collections::HashMap<u32, u32> = Default::default();
         for h in &q.fingerprint {
@@ -335,7 +558,7 @@ impl Corpus {
                     && c.lang.family() == q.lang.family()
                     && !same_place(q, c)
             })
-            .map(|c| (c, score_with(q, c, &opts.weights)))
+            .map(|c| (c, score_lean(q, c, &opts.weights)))
             .filter(|(c, s)| {
                 s.combined >= opts.threshold
                     && s.name >= opts.min_name
@@ -492,6 +715,87 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].candidate.name, "total");
         assert!(m[0].scores.structural > 0.99);
+    }
+
+    #[test]
+    fn index_agrees_with_brute_force_for_every_profile_even_without_shared_ngrams() {
+        // same name, calls and literals, but no 4-gram in common (the second unit gets a disjoint
+        // fingerprint set): only the other features can make this pair match
+        let srcs = [
+            "def load_settings(path):\n    data = fetch(path, 'cfg')\n    parsed = parse(data, 'cfg')\n    skip(parsed, 'cfg')\n    return parsed\n",
+            "def load_settings(path):\n    data = fetch(path, 'cfg')\n    parsed = parse(data, 'cfg')\n    skip(parsed, 'cfg')\n    return parsed\n",
+            "def other(x):\n    y = x + 1\n    z = y * 2 + x\n    return z * 2\n",
+        ];
+        let mut all: Vec<Unit> = srcs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| units(&format!("{i}.py"), s))
+            .collect();
+        all[1].fingerprint = (1..9u64).map(|i| i << 40).collect();
+        assert!(all[0].fingerprint.is_disjoint(&all[1].fingerprint));
+        let corpus = Corpus::new(all.clone());
+        for (name, weights) in [
+            ("reimpl", Weights::default()),
+            ("copies", Weights::copies()),
+            ("reimpl+embed", Weights::default().with_embed(0.35)),
+            ("copies+embed", Weights::copies().with_embed(0.35)),
+        ] {
+            for threshold in [0.1, 0.3, 0.35, 0.6] {
+                let opts = MatchOptions {
+                    threshold,
+                    min_tokens: 3,
+                    top_n: 10,
+                    min_lines: 0,
+                    min_name: 0.0,
+                    weights,
+                    skip_tests: false,
+                    skip_boilerplate: false,
+                };
+                for q in &all {
+                    let brute = all
+                        .iter()
+                        .filter(|c| {
+                            !same_place(q, c) && score_with(q, c, &weights).combined >= threshold
+                        })
+                        .count();
+                    assert_eq!(
+                        corpus.best_for(q, opts).len(),
+                        brute,
+                        "{name} @ {threshold} for {}",
+                        q.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lean_scoring_has_the_same_combined_as_full_scoring() {
+        let a = units("a.py", "def f(x):\n    y = g(x, 'k')\n    return y + 1\n").remove(0);
+        let b = units("b.py", "def f(x):\n    y = h(x, 'k')\n    return y + 2\n").remove(0);
+        for w in [
+            Weights::default(),
+            Weights::copies(),
+            Weights::default().with_embed(0.35),
+        ] {
+            assert_eq!(
+                score_lean(&a, &b, &w).combined,
+                score_with(&a, &b, &w).combined
+            );
+        }
+    }
+
+    #[test]
+    fn with_embed_changes_nothing_for_units_without_vectors() {
+        let a = units("a.py", "def f(x):\n    y = x + 1\n    return y\n").remove(0);
+        let b = units("b.py", "def g(x):\n    y = x + 1\n    return y\n").remove(0);
+        for w in [Weights::default(), Weights::copies()] {
+            let plain = score_with(&a, &b, &w).combined;
+            let blended = score_with(&a, &b, &w.with_embed(0.35)).combined;
+            // the copies weights sum to 0.99, so renormalizing the embedding term away moves the
+            // score by well under 1%; for weights summing to 1 it is exact
+            assert!((plain - blended).abs() < 0.005, "{plain} vs {blended}");
+        }
     }
 
     #[test]

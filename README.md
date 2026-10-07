@@ -1,6 +1,6 @@
 # duplicatecode
 
-Static (LLM-free) detection of duplicate / similar code in Python, TypeScript (TSX) and C#,
+Static by default (LLM-free, no network unless `--embed*` is used) detection of duplicate / similar code in Python, TypeScript/JavaScript (TSX/JSX), SQL and C#,
 aimed at catching an LLM re-implementing something that already exists. Input can be a git diff
 checked against existing source.
 
@@ -31,6 +31,141 @@ duplicatecode scan . --exclude '**/generated/**' --skip-tests --fail-on-found   
 duplicatecode scan . --pairs --json                  # machine-readable pairs instead of groups
 duplicatecode bench --dataset dataset [--file-level] [--mutations] [--negatives <other repo>]
 ```
+
+## More ways to look
+
+```sh
+duplicatecode fragments packages/            # copied blocks inside different functions (4+ identical statements)
+duplicatecode scan . --pairs --explain       # say what differs: literals, calls, lines (what to parameterize)
+duplicatecode find "retry with exponential backoff" src/   # does something like this already exist? (needs embeddings)
+```
+
+- `fragments` indexes windows of consecutive normalized statements, so a block pasted into another
+  function is found even when the surrounding functions differ. On an injection benchmark (renamed
+  blocks of real functions pasted into others) it finds 93-97% of blocks of 6+ statements; see
+  `eval/REPORT.md`. Tune with `--min-stmts` / `--min-tokens`; constructors and dunders are ignored.
+- `--explain` adds, per pair, the literals and calls only one side has and the source lines with no
+  counterpart ("16 of 18/17 statements shared").
+- `find` embeds the query and every unit and ranks by similarity. With MiniLM, 50 task descriptions
+  against 168 implementation units rank the right one first 94% of the time; with 1,379 unrelated real
+  units mixed in, 82% first and 96% in the top 3 (every query within the top 10).
+- Default thresholds depend on the profile: `copies` keeps its tuned 0.6 (`scan`), 0.4 (`diff`), 0.45
+  (`review`); `reimpl` scores live lower, so it defaults to 0.35 / 0.28 / 0.30, which correspond to roughly
+  0.1% / 1% false-positive rates on unrelated code in the benchmarks. With `--embed` the `reimpl`
+  defaults rise by 0.07 because blended scores of unrelated code rise too.
+
+## Embeddings (bring your own key)
+
+Two optional signals, both off by default (the detector stays static and offline unless you ask).
+
+> **Privacy warning.** `--embed openai`, `--embed cohere`, and `--embed-code` / `--embeddings` pointed at any
+> hosted endpoint (OpenAI, Cohere, Azure, ...) **upload the source text of your units** to that provider
+> (`--embeddings` sends identifier names only). `find` embeds **every unit under the given paths**, so
+> `find ... --embed openai` uploads all of it. The local presets (`minilm`, `qwen3`, `potion`) are meant for a
+> server on loopback (default `127.0.0.1:8099`; `DUPLICATECODE_EMBED_ENDPOINT` overrides it): pointing that
+> variable at a remote host sends text there too. Do not use hosted embeddings on code you may not share.
+
+- `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
+- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`; `qwen3` is about 5x slower than `minilm` on CPU, so use it with a GPU or prefer `minilm`) and implies
+  `--embed-code`. Model ids go into the cache key, so vectors of different models never mix.
+- `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
+  the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
+  re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from
+  0.70 to 0.89 on a held-out half; see `eval/REPORT.md` for the numbers and caveats. Vectors are cached per
+  unit text in `~/.cache/duplicatecode/embeddings.bin`, so a rescan only embeds what changed.
+
+Credentials come from the environment:
+
+```sh
+# OpenAI
+export OPENAI_API_KEY=sk-...                      # optional: OPENAI_EMBEDDING_MODEL (default text-embedding-3-small)
+# Cohere (native /v2/embed)
+export COHERE_API_KEY=...                         # optional: COHERE_EMBEDDING_MODEL (default embed-v4.0)
+# OpenAI-compatible server (vLLM, Ollama, LiteLLM, ...)
+export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_EMBEDDING_MODEL=nomic-embed-text
+# Azure AI Foundry (key, or `az login` if no key is set)
+export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
+export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+# Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+# Fully local, no key: start the server once (CPU; it loads whichever model a request names)
+#   uv run --no-project --python 3.12 eval/embed_server.py
+#   duplicatecode scan . --embed minilm          # or: qwen3, potion  (default endpoint 127.0.0.1:8099)
+# Hosted presets: --embed openai (OPENAI_API_KEY), --embed cohere (COHERE_API_KEY)
+
+duplicatecode embed-test fetchUser getUser     # check credentials
+duplicatecode scan . --embed-code              # whole-unit embeddings
+duplicatecode scan . --embeddings              # names only
+```
+
+## API
+
+### Command line
+
+| command | what it does |
+| --- | --- |
+| `scan <paths>` | similar units inside one or more folders; `--pairs`, `--explain`, `--json`, `--fail-on-found` |
+| `diff` | check code added in a git diff (stdin or `--diff`) against the repo (`--repo`) |
+| `review` | ranked candidates for a diff, for a human or an agent to judge |
+| `fragments <paths>` | copied blocks of identical statements inside different functions |
+| `find "<description>" <paths>` | existing units closest to a plain-language description (needs embeddings) |
+| `units <path>` / `show file:10-40` | list extracted units / print a unit's source |
+| `embed-test <names...>` | check the embedding provider and calibrate `--embed-floor` |
+| `eval-groups`, `bench`, `make-mutation-groups` | evaluation (see `eval/README.md`) |
+
+Shared options: `--profile copies|reimpl`, `--threshold`, `--min-tokens`, `--min-lines`, `--exclude`, `--skip-tests`,
+`--cross-file`, `--json`. Embedding options (all off by default): `--embed <preset>`, `--embed-code`,
+`--embed-weight`, `--embed-max-chars`, `--embeddings`, `--embed-cache`, `--embed-dims`.
+
+```sh
+duplicatecode scan . --profile reimpl --min-name 0 --embed minilm --pairs --explain
+duplicatecode fragments src/ --min-stmts 4 --min-tokens 30 --cross-file --json
+duplicatecode find "retry with exponential backoff" src/ --top 5 --json
+duplicatecode diff --repo . < change.diff --embed openai
+```
+
+JSON output:
+
+- `find --json`: `[{score, file, name, kind, start_line, end_line}]`
+- `fragments --json`: `[{a, b, statements, tokens}]` with `a`/`b` = `{file, unit, start_line, end_line, coverage}`
+- `scan --pairs --json`: `[{query, candidate, scores}]`; with `--explain`: `[{match, explanation}]`
+- `scan --json` (groups): `[{score, units: [{file, name, kind, start_line, end_line}]}]`
+
+`scan --fail-on-found` exits with status 1 when anything is reported, for CI.
+
+### Rust library
+
+The engine crate `duplicatecode-engine` is what the CLI uses:
+
+```rust
+use duplicatecode_engine::embed::{embed_unit_code, EmbedConfig, EmbeddingCache};
+use duplicatecode_engine::explain::explain;
+use duplicatecode_engine::fragments::{find_fragments, FragmentOptions};
+use duplicatecode_engine::index::Weights;
+use duplicatecode_engine::{find_matches, load_units_with, Corpus, MatchOptions};
+
+let mut units = load_units_with(Path::new("src/"), &[]);
+
+// optional: embed every unit; units without a vector simply skip the embedding term
+let cfg = EmbedConfig::from_env(None).ok_or("no embedding provider configured")?;
+let mut cache = EmbeddingCache::load(&EmbeddingCache::default_path());
+embed_unit_code(&mut units, &cfg, &mut cache, 3000)?;
+
+// pairs: queries against a corpus
+let weights = Weights::default().with_embed(0.35); // 0.0 = static only
+let corpus = Corpus::new(units.clone());
+let pairs = find_matches(&units, &corpus, MatchOptions { weights, threshold: 0.42, ..Default::default() });
+
+// copied blocks, and what differs inside a pair
+let blocks = find_fragments(&units, FragmentOptions::default());
+println!("{}", explain(&units[0], &units[1]).summary());
+```
+
+### Not built yet
+
+Planned, not available today: a `.duplicatecode.toml` with an `[embed]` section; `--embed-optional` (warn and
+fall back to the static score when the provider is unreachable; today an unreachable provider is an error);
+`--allow-upload` (required for the hosted presets, which send source text out); a `duplicatecode[embed]` Python
+extra that starts the local server on demand; an `Embedder` trait so providers can plug in without HTTP.
 
 ## How it works
 
@@ -77,9 +212,9 @@ Self-scans of three internal repositories (Python + TypeScript), 189 pairs judge
   before trusting them. A structure-heavy `--profile reimpl` exists for renamed re-implementations
   (use with `--min-name 0`) but has no real-repo precision data yet.
 
-### Fresh held-out check (copies profile, threshold 0.6)
+### Fresh held-out check (copies profile, threshold 0.6 = the `copies` default for `scan`)
 
-A third, untouched sample of 57 pairs (nothing was tuned on it): 30% true duplicates, 47% incl. partial
+A third, untouched sample of 57 pairs (nothing was tuned on it; the `reimpl` profile has different defaults, 0.35 for `scan`, and is not covered by this sample): 30% true duplicates, 47% incl. partial
 (OneSales 0/24, MDMApp 11/24, CCMT2 6/9 true). The 50%/76% above was optimistic because it was measured on the
 pairs used to choose the weights. Test code is about half of the noise but also holds real copies
 (25% true either way), so it is kept by default; `--skip-tests` drops it.
@@ -97,7 +232,7 @@ by Haiku and Sonnet without seeing the repo. Fraction where the original is foun
 | 0.5 | 45% | 14% | 30% | 1% |
 | 0.6 | 24% | 5% | 14% | 0% |
 
-So `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6. About half of
+So with the `copies` profile `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6; the `reimpl` profile has its own lower defaults (see above). About half of
 independent re-implementations are caught; the rest are genuinely different code. The structure-heavy `reimpl`
 profile is not better on this test.
 
@@ -114,7 +249,7 @@ read/grep, two with this CLI. All distinct groups (82) were then judged blind by
 | OneSales, with CLI | 21 | 10 | 48% / 86% | 67% | 9 |
 
 Only 18 of 82 groups were found by both, so the approaches are complementary. The agents' reports are capped at 30
-groups, so the raw tool is a better measure of recall: `scan --threshold 0.6` (defaults) finds 38 of the 40 judged
+groups, so the raw tool is a better measure of recall: `scan --threshold 0.6` (the `copies` defaults) finds 38 of the 40 judged
 true duplicates (25/25 MDMApp, 13/15 OneSales) and 23 of the 25 that the LLM-only agents found independently.
 What it still misses: a differently-written picker function (same purpose, different code) and a formatFileSize
 variant with different constants. Fixed after this test: tiny same-name exact copies (`min_tokens` 20 -> 8, near-exact

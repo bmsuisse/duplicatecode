@@ -1,0 +1,13 @@
+[package]
+name = "static-rank"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Dev tool: static similarity of re-implementations against a codebase's functions (no embeddings)."
+
+[dependencies]
+duplicatecode-engine = { path = "../../crates/duplicatecode-engine" }
+serde_json = "1"
+
+# not part of the main workspace
+[workspace]

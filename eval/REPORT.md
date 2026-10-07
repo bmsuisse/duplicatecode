@@ -1,8 +1,8 @@
 # Duplicate-code detection: what was tested, what helped, what is left
 
 Branch `autoresearch/dedup-quality`. All numbers come from `duplicatecode eval-groups` (see
-`eval/README.md`). Tune on **dev**, confirm on **holdout** (disjoint problems / queries / components /
-tasks). Headline score = mean over datasets of `(AUC + TPR@1%FPR) / 2` for the combined score.
+`eval/README.md`). Tune on **dev**, confirm on **holdout** (intended to be disjoint; see the overlap caveat in
+"Limitations of these numbers"). Headline score = mean over datasets of `(AUC + TPR@1%FPR) / 2` for the combined score.
 
 ## Result
 
@@ -96,7 +96,7 @@ How much to trust it:
 - **The CodeNet rows are inflated and should not be quoted.** Cosine alone reaches 0.98 / 0.96, far above
   anything structural. Explicit problem ids or URLs in comments explain only about 4% of the files
   (21/480 Python, 5/480 JS), so the likely cause is training-set contamination (CodeNet is a standard
-  code-model corpus). I did not run a comment-stripped re-embedding.
+  code-model corpus). No comment-stripped re-embedding was run.
 - **The fn-* rows are the clean test**: the LLM implementations were written for this repo, so the model
   cannot have seen them. Python improves a lot (held-out half 0.70 -> 0.89); TypeScript only a little
   (0.61 -> 0.67) and cosine alone is worse than the static score there.
@@ -147,9 +147,10 @@ Proposal:
 The top two are within noise on 25 tasks; the ranking among them is not established. A larger,
 uncontaminated function-level set is the prerequisite for a firmer default.
 
-Recommendation: add unit-level embeddings as an **optional** signal behind a flag (blend about 0.3-0.5 for
-Python), keep the static path as the default, and re-measure on a larger uncontaminated function-level set
-before choosing a default lambda.
+Recommendation (implemented): unit-level embeddings were added as an **optional** signal behind a flag (blend
+about 0.3-0.5 for Python; shipped default 0.35), the static path stays the default, and the default lambda
+should be re-measured on a larger uncontaminated function-level set. Hosted presets send unit source text to
+the provider (see the README warning).
 
 
 ## Additions after the first report
@@ -191,7 +192,7 @@ the tool ignores them by design (Python set: 111 candidate functions from that r
 
 The TypeScript set (`eval/make_fragment_data_ts.py`, run under Python 3.12 because the tree-sitter
 TypeScript package has no free-threaded 3.14 wheel) pastes renamed statement blocks between real
-`function_declaration`s from OneSales/frontend; it has 94 candidate functions, so the numbers are noisy
+`function_declaration`s from an internal TSX frontend; it has 94 candidate functions, so the numbers are noisy
 (40 / 45 / 31 injected pairs for blocks 6 / 4 / 8). SQL fragments are not benchmarked.
 
 Sampled non-injected reports were real duplicates in the repo (the same credential-handling block, the same
@@ -233,36 +234,40 @@ model reproduces the offline gain inside the shipped scoring code.
 without a counterpart, e.g. a batch-upload helper in two sibling folders: "16 of 18/17 statements shared, differing
 lines 237-247 vs 95-107".
 
+## Shipped / measured since the first draft
+
+- **Embeddings** shipped as an optional signal: `--embed <preset>` (implies `--embed-code`, whole-unit text,
+  vectors cached per unit text in a flat file) and `--embed-code`; `--embeddings` still embeds names only.
+  Blend weight `--embed-weight` defaults to 0.35.
+- **Scan speed** on an 11k-unit repository (best of two runs, original `main` vs this branch): default scan 4.7 s
+  to 4.0 s, `scan --min-name 0` 13.3 s to 6.9 s, and `--profile reimpl --min-name 0` 4.0 s to 12.2 s. A
+  performance review first measured the default scan 28% slower and `reimpl` 4.7x slower (3.9 s to 18.1 s); the
+  fixes were to skip computing zero-weight features on the search path and to stop building the k-gram counts
+  when the other features alone can reach the threshold. `reimpl` stays about 3x slower than `main` because at
+  its weights the n-gram prefilter cannot prune; a cheap secondary bound would be the next step.
+
 ## What could still be optimized
 
-1. **Embeddings as an optional signal** (see above for the measured value). Design: keep the static path
-   as the default; `--embeddings` already supports OpenAI, OpenAI-compatible and Azure AI Foundry
-   endpoints for names; extend it to whole-unit text, cache vectors in the existing flat file, and
-   add one blend weight. A local `embed` extra needs a Python helper the CLI can call, because the wheel is
-   a Rust binary; a CUDA build of `embed-anything` is only worthwhile once the GPU driver loads.
-2. **Ship IDF in the scan path.** IDF is worth +0.014 headline (mostly whole files; +0.007 on fn-python), but
+1. **Ship IDF in the scan path.** IDF is worth +0.014 headline (mostly whole files; +0.007 on fn-python), but
    `Corpus::best_for` scores without it. The k-gram prefilter assumes unweighted Jaccard, so IDF needs
    stop-gram postings or a looser bound. Small gain, moderate work.
-3. **A bigger function-level benchmark.** The `fn-*` sets are 25 tasks split odd/even, which is small
+2. **A bigger function-level benchmark.** The `fn-*` sets are 25 tasks split odd/even, which is small
    enough that 11 weights can overfit. Independent re-implementations of real repo functions (the
    `reimpl-eval` idea) in Python, TypeScript/React and SQL are the most valuable missing data.
-4. **React-specific normalization.** The React set is saturated by mechanical rewrites, so it says nothing
+3. **React-specific normalization.** The React set is saturated by mechanical rewrites, so it says nothing
    about independent components. JSX-aware normalization (prop destructuring vs `props.x`, hook order,
    class-name string literals, wrapper components) is untested.
-5. **SQL dialect coverage and scope analysis.** `tree-sitter-sequel` is generic/Postgres-flavoured; Spark
+4. **SQL dialect coverage and scope analysis.** `tree-sitter-sequel` is generic/Postgres-flavoured; Spark
    (`values:key[0].data::string`, `left anti join`, backticks) parses with error nodes. Alias/CTE
    resolution is name-based; a real scope pass and column lineage would make renames and CTE-vs-subquery
    rewrites exact. The synthetic SQL set saturates (0.99), so real labelled pairs from
    internal repositories are the next test.
-6. **JavaScript is the weakest language (0.50).** Input handling idioms (`readFileSync`, `process.stdin`
+5. **JavaScript is the weakest language (0.50).** Input handling idioms (`readFileSync`, `process.stdin`
    events, `readline`) and loop styles (`for` / `forEach` / `map` / `reduce`) differ per author; canonical
    forms for these would help, and a loop-to-iterator normalization like the Python comprehension one.
-7. **Learned re-ranker** (trees, see the ceilings table) compiled into the engine, gated behind a flag so
+6. **Learned re-ranker** (trees, see the ceilings table) compiled into the engine, gated behind a flag so
    the default stays interpretable.
-8. **Scan speed with the new weights.** The reimpl profile's structural weight is small, so the k-gram
-   prefilter prunes less; measure scan time on large repos before making it a default. SQL scoring with
-   structural weight 0 compares every same-family unit.
-9. **GPU.** All embedding runs used the CPU (about 2.5 s per file with a 0.6B model); the PyPI `embed-anything`
+7. **GPU.** All embedding runs used the CPU (about 2.5 s per file with a 0.6B model); the PyPI `embed-anything`
    wheel is CPU-only, so GPU use needs a CUDA build.
 
 ## Limitations of these numbers
@@ -273,3 +278,10 @@ lines 237-247 vs 95-107".
 - Whole-file units are not the main product path; the function-level sets are the ones that matter most
   and are the smallest.
 - Dev-tuned weights were confirmed on holdout, but holdout files come from the same sources.
+- **Dev and holdout are not disjoint for the CodeNet sets.** For CodeNet Python and JavaScript the two splits
+  were separated only by random seed and overlap: 13 of 60 Python and 4 of 60 JavaScript problems appear in
+  both. On holdout problems that are not in dev, Python scores 0.648 (0.659 on the full holdout) and JavaScript
+  0.497 (0.497), so the effect is small but the headline holdout numbers are not fully independent. The SQL
+  and React sets and the function-level sets are disjoint.
+- The SQL set's dev and holdout were drawn as random windows and could in principle overlap; the check
+  measured 0 shared queries.

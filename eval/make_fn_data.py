@@ -24,27 +24,40 @@ def main(dataset: pathlib.Path, dev: pathlib.Path, hold: pathlib.Path) -> None:
         for d in root.glob("fn-*"):
             shutil.rmtree(d)
     n = 0
+    skipped: list[pathlib.Path] = []
+    seen: dict[pathlib.Path, pathlib.Path] = {}
 
     def put(task: str, src: pathlib.Path, tag: str) -> None:
         nonlocal n
         lang = LANG.get(src.suffix)
         if not lang:
+            skipped.append(src)
             return
         root = dev if int(task) % 2 else hold
         out = root / f"fn-{lang}" / task
         out.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, out / f"{tag}-{src.name}")
+        dest = out / f"{tag}-{src.name}"
+        if dest in seen:
+            sys.exit(f"duplicate target key {dest}: {seen[dest]} and {src}")
+        seen[dest] = src
+        shutil.copyfile(src, dest)
         n += 1
 
     for model in sorted((dataset / "impls").iterdir()):
         for f in sorted(model.iterdir()):
             if f.name in target:
                 put(target[f.name], f, f"strict-{model.name}")
+            else:
+                skipped.append(f)
     for kind in ("impls-loose", "impls-hard"):
         for model in sorted((dataset / kind).iterdir()):
             for task in sorted(p for p in model.iterdir() if p.is_dir()):
                 for f in sorted(task.iterdir()):
                     put(task.name[:2], f, f"{kind[6:]}-{model.name}")
+    if skipped:
+        print(f"skipped {len(skipped)} files (no task mapping or unsupported extension):")
+        for f in skipped:
+            print(f"  {f}")
     print(f"wrote {n} files")
 
 

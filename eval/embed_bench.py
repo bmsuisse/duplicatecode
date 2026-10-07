@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10,<3.13"
-# dependencies = ["embed-anything", "numpy", "pandas", "scikit-learn"]
+# dependencies = ["embed-anything==0.7.1", "numpy==2.5.3", "pandas==3.0.6", "scikit-learn==1.9.1"]
 # ///
 """Embedder bake-off with embed-anything on clean (uncontaminated) clone data.
 
@@ -29,7 +29,7 @@ def collect(root: pathlib.Path, tag: str, bin_path: str):
     items = []
     for ds in sorted(p for p in root.glob("fn-*") if p.is_dir()):
         for g in sorted(p for p in ds.iterdir() if p.is_dir()):
-            out = subprocess.run([bin_path, "units", str(g)], capture_output=True, text=True).stdout
+            out = subprocess.run([bin_path, "units", str(g)], capture_output=True, text=True, check=True).stdout
             for line in out.splitlines():
                 m = re.match(r"(.+?):(\d+)-(\d+) (\w+) (\S+) \((\d+) tokens\)", line)
                 if not m or int(m.group(6)) < 8:
@@ -45,6 +45,10 @@ def collect(root: pathlib.Path, tag: str, bin_path: str):
     return items
 
 
+class DataMismatch(Exception):
+    """Too many dump pairs without a vector; a data problem, not a model error."""
+
+
 def metrics(y, s):
     thr = np.quantile(s[y == 0], 0.99)
     auc, tpr = roc_auc_score(y, s), float((s[y == 1] > thr).mean())
@@ -58,7 +62,11 @@ def evaluate(vecs: dict, dumps: dict) -> dict:
             b = d[d.ds == ds].copy()
             ka = [f"{tag}|{ds}|{x}" for x in b.fa]
             kb = [f"{tag}|{ds}|{x}" for x in b.fb]
-            ok = np.array([x in vecs and y in vecs for x, y in zip(ka, kb)])
+            ok = np.array([x in vecs and y in vecs for x, y in zip(ka, kb)], dtype=bool)
+            dropped = int((~ok).sum())
+            print(f"  {tag}:{ds}: dropped {dropped}/{len(ok)} pairs with no vector", flush=True)
+            if len(ok) and dropped > 0.05 * len(ok):
+                raise DataMismatch(f"{tag}:{ds}: {dropped}/{len(ok)} pairs dropped (>5%); dump and data are out of sync")
             b, ka, kb = b[ok], np.array(ka)[ok], np.array(kb)[ok]
             cos = np.array([float(vecs[x] @ vecs[y]) for x, y in zip(ka, kb)])
             y = (b.ga == b.gb).astype(int).values
@@ -90,7 +98,7 @@ if __name__ == "__main__":
     print(f"{len(texts)} texts, mean {np.mean([len(t) for t in texts]):.0f} chars", flush=True)
     out = json.loads(pathlib.Path(a.out).read_text()) if pathlib.Path(a.out).exists() else {}
     for mid in a.models:
-        if mid in out:
+        if "scores" in out.get(mid, {}):
             continue
         try:
             t0 = time.time()
@@ -107,6 +115,8 @@ if __name__ == "__main__":
             out[mid] = {"dim": int(v.shape[1]), "sec_per_text": secs / len(texts), "load_s": load, "scores": res}
             print(f"{mid}: dim={v.shape[1]} {secs/len(texts)*1000:.0f} ms/text", flush=True)
         except BaseException as e:  # panics from the native loader are BaseException
+            if isinstance(e, (KeyboardInterrupt, SystemExit, DataMismatch)):
+                raise
             out[mid] = {"error": str(e)[:200]}
             print(f"{mid}: FAILED {str(e)[:120]}", flush=True)
         pathlib.Path(a.out).write_text(json.dumps(out, indent=1))

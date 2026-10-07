@@ -4,3 +4,5 @@ node_modules/
 .venv/
 .ruff_cache/
 eval/data/
+eval/static_rank/target/
+eval/static_rank/Cargo.lock

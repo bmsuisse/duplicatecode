@@ -61,13 +61,15 @@ Two optional signals, both off by default (the detector stays static and offline
 > **Privacy warning.** `--embed openai`, `--embed cohere`, and `--embed-code` / `--embeddings` pointed at any
 > hosted endpoint (OpenAI, Cohere, Azure, ...) **upload the source text of your units** to that provider
 > (`--embeddings` sends identifier names only). `find` embeds **every unit under the given paths**, so
-> `find ... --embed openai` uploads all of it. The local presets (`minilm`, `qwen3`, `potion`) are meant for a
-> server on loopback (default `127.0.0.1:8099`; `DUPLICATECODE_EMBED_ENDPOINT` overrides it): pointing that
+> `find ... --embed openai` uploads all of it. The local presets (`gemma`, `minilm`, `qwen3`, `potion`) are meant for a
+> server on loopback (`gemma`: ollama on `127.0.0.1:11434`, the others `127.0.0.1:8099`; `DUPLICATECODE_EMBED_ENDPOINT` overrides it): pointing that
 > variable at a remote host sends text there too. Do not use hosted embeddings on code you may not share.
 
 - `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
-- `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`; `qwen3` is about 5x slower than `minilm` on CPU, so use it with a GPU or prefer `minilm`) and implies
-  `--embed-code`. Model ids go into the cache key, so vectors of different models never mix.
+- `--embed` is the short form and implies `--embed-code`. A bare `--embed` uses **`gemma`** (embeddinggemma via a local
+  [ollama](https://ollama.com): `ollama pull embeddinggemma`), the best model in the codebase benchmark (issue #12: re-implementation
+  retrieval R@1 0.94 vs 0.89 for the static detector alone, unchanged when function names are masked). Other presets:
+  `--embed=minilm|qwen3|potion|openai|cohere`; MiniLM is smaller but clearly weaker (0.85) and leans on names. Model ids go into the cache key, so vectors of different models never mix.
 - `--embed-code` embeds the *whole text of every unit* (function, class, file, SQL statement) and blends
   the cosine into the score (`--embed-weight`, default 0.35, others scaled by 1 - weight). It finds
   re-implementations that share no tokens. On function-level LLM re-implementations it lifted Python from
@@ -87,7 +89,8 @@ export OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=anything OPENAI_
 export AZURE_AI_FOUNDRY_ENDPOINT=https://<res>.services.ai.azure.com
 export AZURE_AI_FOUNDRY_API_KEY=... AZURE_AI_FOUNDRY_EMBEDDING_DEPLOYMENT=text-embedding-3-small
 # Azure OpenAI: AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY / AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-# Fully local, no key: start the server once (CPU; it loads whichever model a request names)
+# Fully local, no key, recommended: ollama pull embeddinggemma && duplicatecode scan . --embed   (GPU: ~5 ms per unit)
+# Other local models: start the server once (CPU; it loads whichever model a request names)
 #   uv run --no-project --python 3.12 eval/embed_server.py
 #   duplicatecode scan . --embed minilm          # or: qwen3, potion  (default endpoint 127.0.0.1:8099)
 # Hosted presets: --embed openai (OPENAI_API_KEY), --embed cohere (COHERE_API_KEY)

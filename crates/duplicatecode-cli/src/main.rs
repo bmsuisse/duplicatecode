@@ -11,11 +11,14 @@ use duplicatecode_engine::{
 use std::io::Read;
 use std::path::PathBuf;
 
-/// Named embedding setups for `--embed`. Local presets talk to `eval/embed_server.py` (default
-/// http://127.0.0.1:8099/v1, override with DUPLICATECODE_EMBED_ENDPOINT), which loads the named model.
+/// Named embedding setups for `--embed`. `gemma` talks to a local ollama (default
+/// http://127.0.0.1:11434/v1); the other local presets talk to `eval/embed_server.py` (default
+/// http://127.0.0.1:8099/v1). DUPLICATECODE_EMBED_ENDPOINT overrides either, loopback hosts only.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Preset {
-    /// all-MiniLM-L6-v2, local: fastest, tied for best quality in the bake-off
+    /// embeddinggemma via local ollama (`ollama pull embeddinggemma`): best in the codebase bake-off, the default of a bare `--embed`
+    Gemma,
+    /// all-MiniLM-L6-v2, local server: small and fast, but below `gemma` on re-implementation retrieval
     Minilm,
     /// Qwen3-Embedding-0.6B, local: 8k-token context, slower
     Qwen3,
@@ -30,9 +33,9 @@ enum Preset {
 impl Preset {
     fn config(self, dims: Option<u32>) -> Result<duplicatecode_engine::embed::EmbedConfig> {
         use duplicatecode_engine::embed::EmbedConfig;
-        let local = |model: &str| -> Result<EmbedConfig> {
+        let local = |model: &str, default_endpoint: &str| -> Result<EmbedConfig> {
             let endpoint = std::env::var("DUPLICATECODE_EMBED_ENDPOINT")
-                .unwrap_or_else(|_| "http://127.0.0.1:8099/v1".into());
+                .unwrap_or_else(|_| default_endpoint.into());
             // the local server returns full vectors whatever `dimensions` asks for
             let cfg = EmbedConfig::new(endpoint, model.into(), Some("local".into()), None, None);
             anyhow::ensure!(
@@ -43,13 +46,15 @@ impl Preset {
             );
             Ok(cfg)
         };
+        const SERVER: &str = "http://127.0.0.1:8099/v1";
         let key = |name: &str| {
             std::env::var(name).with_context(|| format!("this preset needs {name} to be set"))
         };
         Ok(match self {
-            Preset::Minilm => local("sentence-transformers/all-MiniLM-L6-v2")?,
-            Preset::Qwen3 => local("Qwen/Qwen3-Embedding-0.6B")?,
-            Preset::Potion => local("minishlab/potion-base-8M")?,
+            Preset::Gemma => local("embeddinggemma", "http://127.0.0.1:11434/v1")?,
+            Preset::Minilm => local("sentence-transformers/all-MiniLM-L6-v2", SERVER)?,
+            Preset::Qwen3 => local("Qwen/Qwen3-Embedding-0.6B", SERVER)?,
+            Preset::Potion => local("minishlab/potion-base-8M", SERVER)?,
             Preset::Openai => EmbedConfig::new(
                 "https://api.openai.com/v1".into(),
                 "text-embedding-3-small".into(),
@@ -77,7 +82,8 @@ struct EmbedArgs {
     #[arg(long)]
     embeddings: bool,
     /// Embed every unit with a named setup (implies --embed-code); see `--help` for the presets.
-    #[arg(long, value_enum)]
+    /// A bare `--embed` means `gemma`; write `--embed=minilm` etc. for the others.
+    #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "gemma")]
     embed: Option<Preset>,
     /// Embed the full text of every unit (function, class, file, statement) and blend the cosine of
     /// the two vectors into the score. Finds re-implementations that share no tokens.

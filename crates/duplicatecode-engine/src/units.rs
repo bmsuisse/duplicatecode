@@ -83,7 +83,28 @@ impl Unit {
     }
 }
 
+/// Tree walks recurse once per nesting level, so one deeply nested expression (hundreds of
+/// thousands of parentheses in a generated file) would overflow the default stack and abort the
+/// whole scan. Run the extraction on a thread with a large stack instead.
+fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn_scoped(scope, f)
+        {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            Err(e) => panic!("cannot start the extraction thread: {e}"),
+        }
+    })
+}
+
 pub fn extract_units(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
+    on_big_stack(|| extract_units_inner(file, lang, source))
+}
+
+fn extract_units_inner(file: &str, lang: Lang, source: &str) -> Vec<Unit> {
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
         return Vec::new();
@@ -115,6 +136,10 @@ struct Features {
 
 /// The whole file as a single unit (all top-level and nested code together).
 pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
+    on_big_stack(|| extract_file_unit_inner(file, lang, source))
+}
+
+fn extract_file_unit_inner(file: &str, lang: Lang, source: &str) -> Option<Unit> {
     let mut parser = Parser::new();
     parser.set_language(&lang.ts_language()).ok()?;
     let inlined = inline_entry_point(&mut parser, lang, source);
@@ -130,9 +155,7 @@ pub fn extract_file_unit(file: &str, lang: Lang, source: &str) -> Option<Unit> {
         src: source.as_bytes(),
         units: &mut units,
     };
-    let stem = file.rsplit('/').next().unwrap_or(file);
-    let stem = stem.split('.').next().unwrap_or(stem).to_string();
-    ctx.emit("file", stem, tree.root_node());
+    ctx.emit("file", file_stem(file), tree.root_node());
     units.pop()
 }
 
@@ -198,7 +221,8 @@ fn is_script_noise(node: Node, lang: Lang, src: &[u8]) -> bool {
         "call" => e
             .child_by_field_name("function")
             .is_some_and(|f| text(f) == "sys.setrecursionlimit"),
-        "assignment" => {
+        // `input = sys.stdin.readline` at module level; inside a function `x = o.val` is real code
+        "assignment" if node.parent().is_some_and(|p| p.kind() == "module") => {
             let (l, r) = (
                 e.child_by_field_name("left"),
                 e.child_by_field_name("right"),
@@ -324,9 +348,11 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
         let mut call_range = None;
         for st in root.named_children(&mut root.walk()) {
             let guarded = st.kind() == "if_statement"
-                && st
-                    .child_by_field_name("condition")
-                    .is_some_and(|c| text(c).contains("__name__"))
+                && st.child_by_field_name("alternative").is_none()
+                && st.child_by_field_name("condition").is_some_and(|c| {
+                    let t = text(c);
+                    t.contains("__name__") && t.contains("__main__") && !t.contains("!=")
+                })
                 && st
                     .child_by_field_name("consequence")
                     .filter(|b| b.named_child_count() == 1)
@@ -345,7 +371,9 @@ fn inline_entry_point(parser: &mut Parser, lang: Lang, source: &str) -> String {
         let body_text = &source[body.start_byte() - first..body.end_byte()];
         let dedented: String = body_text
             .lines()
-            .map(|l| l.get(first..).unwrap_or(l.trim_start()))
+            // strip at most the body's indentation: a continuation line of a multi-line string
+            // that starts further left keeps its text
+            .map(|l| &l[(l.len() - l.trim_start().len()).min(first)..])
             .collect::<Vec<_>>()
             .join("\n");
         let mut out = String::with_capacity(source.len());
@@ -408,6 +436,12 @@ fn prune_dead_toplevel(parser: &mut Parser, lang: Lang, source: &str) -> String 
         cur = String::from_utf8(bytes).unwrap_or_default();
     }
     cur
+}
+
+/// `dir/permissions_report.sql` -> `permissions_report`.
+fn file_stem(file: &str) -> String {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    name.split('.').next().unwrap_or(name).to_string()
 }
 
 /// Every node below (and including) `root`, in pre-order.
@@ -518,13 +552,14 @@ impl Ctx<'_> {
         let field_name = |n: Node| n.child_by_field_name("name").map(|x| self.text(x));
         match (self.lang, node.kind()) {
             (Lang::Sql, "statement") => {
-                // only DDL/DML statements are named after their target; checked first so queries
-                // skip the tree walk
+                // DDL/DML statements are named after their target (checked first so queries skip the
+                // tree walk); a plain query is named like its file, as a view is: giving every
+                // SELECT the same name would make any two queries look alike by name
                 let name = node
                     .named_child(0)
                     .filter(|c| c.kind().starts_with("create") || c.kind().starts_with("insert"))
                     .and_then(|_| descendants(node).find(|n| n.kind() == "object_reference"))
-                    .map_or_else(|| "query".into(), |o| sql_name(o, self.src));
+                    .map_or_else(|| file_stem(self.file), |o| sql_name(o, self.src));
                 Some(("statement", name, node))
             }
             (Lang::Python, "function_definition") => Some(("function", field_name(node)?, node)),
@@ -1138,9 +1173,23 @@ impl Ctx<'_> {
                     shape: vec!["return".into(), shape_of(c).join(">")],
                 });
             }
+            // tokens of a compound statement are its header only, so its lines are too
+            let header = (
+                c.start_position().row as u32 + 1,
+                match c
+                    .child_by_field_name("body")
+                    .or_else(|| c.child_by_field_name("consequence"))
+                {
+                    Some(b) if b.start_position().row > c.start_position().row => {
+                        b.start_position().row as u32
+                    }
+                    Some(_) => c.start_position().row as u32 + 1,
+                    None => c.end_position().row as u32 + 1,
+                },
+            );
             for st in &mut out[first..] {
                 if st.lines == (0, 0) {
-                    st.lines = span(c, c);
+                    st.lines = header;
                 }
             }
             self.statements(c, out);
@@ -1458,6 +1507,87 @@ fn callee_name(f: Node, src: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attribute_reads_inside_functions_are_not_script_noise() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let with_read =
+            f("def f(o):\n    x = o.val\n    y = x * 2\n    return y + 1\nprint(f(1))\n");
+        let without = f("def f(o):\n    y = o * 2\n    return y + 1\nprint(f(1))\n");
+        assert_ne!(
+            with_read, without,
+            "x = o.val is real code inside a function"
+        );
+        // the module-level alias is still ignored
+        let alias = f("import sys\ninput = sys.stdin.readline\nn = int(input())\nprint(n)\n");
+        assert_eq!(alias, f("n = int(input())\nprint(n)\n"));
+    }
+
+    #[test]
+    fn plain_sql_queries_are_named_like_their_file() {
+        let name = |file: &str, src: &str| extract_units(file, Lang::Sql, src).remove(0).name;
+        assert_eq!(
+            name("report/sales_by_region.sql", "select a from t;"),
+            "sales_by_region"
+        );
+        assert_eq!(
+            name("v.sql", "create view customer_totals as select 1;"),
+            "customer_totals"
+        );
+        assert_ne!(
+            name("a.sql", "select a from t;"),
+            name("b.sql", "select a from t;")
+        );
+    }
+
+    #[test]
+    fn main_guard_with_else_or_negation_is_not_inlined_and_strings_keep_their_text() {
+        let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;
+        let flat = f("a = int(input())\nprint(a)\n");
+        let with_else = f("def main():\n    a = int(input())\n    print(a)\n\nif __name__ == '__main__':\n    main()\nelse:\n    z = foo(1)\n    bar(z)\n");
+        assert_ne!(flat, with_else, "the else branch must survive");
+        let negated = f("def main():\n    a = int(input())\n    print(a)\n\nif __name__ != '__main__':\n    main()\n");
+        assert_ne!(flat, negated);
+        // a multi-line string inside main() keeps its continuation lines
+        let s = f("def main():\n    s = \"\"\"abc\ndefgh\nij\"\"\"\n    print(s)\nmain()\n");
+        assert_eq!(s, f("s = \"\"\"abc\ndefgh\nij\"\"\"\nprint(s)\n"));
+    }
+
+    #[test]
+    fn deeply_nested_input_does_not_overflow_the_stack() {
+        let depth = 30_000;
+        let sql = format!("select {}1{} from t;", "(".repeat(depth), ")".repeat(depth));
+        let _ = extract_units("deep.sql", Lang::Sql, &sql);
+        let py = format!("x = {}1{}\n", "(".repeat(depth), ")".repeat(depth));
+        let _ = extract_units("deep.py", Lang::Python, &py);
+    }
+
+    #[test]
+    fn a_compound_statement_spans_only_its_header() {
+        let u = extract_units(
+            "a.py",
+            Lang::Python,
+            "def f(x):\n    if x and x > 1:\n        a = 1\n        b = 2\n    return x\n",
+        )
+        .remove(0);
+        let header = u
+            .frag
+            .iter()
+            .find(|s| s.start == 2)
+            .expect("the if statement");
+        assert_eq!(
+            header.end, 2,
+            "the body lines belong to the statements inside it"
+        );
+    }
+
+    #[test]
+    fn react_components_in_plain_js_files_are_parsed() {
+        let path = std::path::Path::new("Card.js");
+        let lang = Lang::from_path(path).unwrap();
+        let src = "export function Card(props) { const t = props.title; return <div>{t}</div>; }\n";
+        assert_eq!(extract_units("Card.js", lang, src).len(), 1);
+    }
+
     #[test]
     fn python_script_noise_is_ignored_in_file_units() {
         let f = |src: &str| extract_file_unit("a.py", Lang::Python, src).unwrap().tokens;

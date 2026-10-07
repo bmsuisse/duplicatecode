@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["sqlglot"]
+# dependencies = ["sqlglot==30.21.0"]
 # ///
 """Build labeled SQL clone groups from gretelai/synthetic_text_to_sql.
 
@@ -10,6 +10,10 @@ conjuncts, subqueries lifted into CTEs). Variants of one query form a group; oth
 negatives. This measures robustness to Type 1-3 rewrites, not independent re-implementation.
 
     uv run eval/fetch_sql.py --queries 80 --seed 1 --out eval/data/codenet/sql
+    uv run eval/fetch_sql.py --queries 80 --seed 2 --parity 1 --out eval/data/holdout/sql
+
+Rows are fetched in 100-row pages. Dev draws from even page indexes (`--parity 0`), holdout from odd ones
+(`--parity 1`), so the two sets can never share a source row whatever the seeds are.
 """
 import argparse
 import json
@@ -47,6 +51,9 @@ def rows(offset: int) -> list[dict]:
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
+            time.sleep(5 * (attempt + 1))
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            print(f"offset {offset} attempt {attempt}: {e}")
             time.sleep(5 * (attempt + 1))
     raise RuntimeError("rate limited")
 
@@ -136,31 +143,43 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", type=int, default=80)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--parity", type=int, choices=(0, 1), default=0, help="page parity: 0 = dev, 1 = holdout")
     ap.add_argument("--out", type=pathlib.Path, required=True)
     a = ap.parse_args()
     rnd = random.Random(a.seed)
-    pool: list[dict] = []
-    for _ in range(14):
-        pool += rows(rnd.randrange(0, 99_000))
-    rnd.shuffle(pool)
-    written = 0
-    for r in pool:
+    pages = list(range(a.parity, 990, 2))  # 100-row pages of ~99k rows; parity keeps dev/holdout disjoint
+    rnd.shuffle(pages)
+    pool: dict[int, dict] = {}
+    for page in pages[:14]:
+        for r in rows(page * 100):
+            try:
+                pool.setdefault(int(r["id"]), r)
+            except (TypeError, ValueError):
+                continue
+    pool_rows = list(pool.values())
+    rnd.shuffle(pool_rows)
+    written = skipped = 0
+    for r in pool_rows:
         if written >= a.queries:
             break
         if r["sql_complexity"] not in WANT or len(r["sql"]) < 120:
             continue
         try:
             v = variants(r["sql"], r["sql_context"])
-        except Exception:
+        except Exception:  # noqa: BLE001  sqlglot cannot parse/optimize some queries
+            skipped += 1
+            continue
+        if not v:
+            skipped += 1
             continue
         if len(set(v.values())) < 4:
             continue
-        d = a.out / f"q{r['id']}"
+        d = a.out / f"q{int(r['id'])}"
         d.mkdir(parents=True, exist_ok=True)
         for name, sql in v.items():
             (d / f"{name}.sql").write_text(sql + "\n", encoding="utf-8")
         written += 1
-    print(f"wrote {written} query groups to {a.out}")
+    print(f"wrote {written} query groups to {a.out} ({skipped} queries skipped: sqlglot failed)")
 
 
 if __name__ == "__main__":

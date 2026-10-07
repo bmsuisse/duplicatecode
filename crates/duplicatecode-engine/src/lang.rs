@@ -15,8 +15,9 @@ impl Lang {
     pub fn from_path(path: &Path) -> Option<Lang> {
         match path.extension()?.to_str()? {
             "py" => Some(Lang::Python),
-            "ts" | "mts" | "cts" | "js" | "mjs" | "cjs" => Some(Lang::TypeScript),
-            "tsx" | "jsx" => Some(Lang::Tsx),
+            "ts" | "mts" | "cts" => Some(Lang::TypeScript),
+            // plain JavaScript uses the TSX grammar: it parses JSX, which the TypeScript grammar does not
+            "tsx" | "jsx" | "js" | "mjs" | "cjs" => Some(Lang::Tsx),
             "cs" => Some(Lang::CSharp),
             "sql" => Some(Lang::Sql),
             _ => None,

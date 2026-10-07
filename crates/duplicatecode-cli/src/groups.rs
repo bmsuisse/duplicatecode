@@ -246,6 +246,8 @@ pub fn make_mutation_groups(
     for (k, p) in files.iter().skip(skip).take(n).enumerate() {
         let text = std::fs::read_to_string(p)?;
         let dir = out.join(format!("c{:03}", skip + k));
+        // a leftover variant of a previous component would be mislabeled as a clone of this one
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("orig.tsx"), &text)?;
         for m in Mutation::ALL {

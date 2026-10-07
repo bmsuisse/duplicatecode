@@ -30,19 +30,26 @@ enum Preset {
 impl Preset {
     fn config(self, dims: Option<u32>) -> Result<duplicatecode_engine::embed::EmbedConfig> {
         use duplicatecode_engine::embed::EmbedConfig;
-        let local = |model: &str| {
+        let local = |model: &str| -> Result<EmbedConfig> {
             let endpoint = std::env::var("DUPLICATECODE_EMBED_ENDPOINT")
                 .unwrap_or_else(|_| "http://127.0.0.1:8099/v1".into());
             // the local server returns full vectors whatever `dimensions` asks for
-            EmbedConfig::new(endpoint, model.into(), Some("local".into()), None, None)
+            let cfg = EmbedConfig::new(endpoint, model.into(), Some("local".into()), None, None);
+            anyhow::ensure!(
+                cfg.is_loopback(),
+                "the local presets only talk to a server on this machine, but DUPLICATECODE_EMBED_ENDPOINT points at {}; \
+                 unset it, or use --embed openai|cohere (or --embed-code with OPENAI_API_KEY etc.) to send code to a hosted provider on purpose",
+                cfg.host()
+            );
+            Ok(cfg)
         };
         let key = |name: &str| {
             std::env::var(name).with_context(|| format!("this preset needs {name} to be set"))
         };
         Ok(match self {
-            Preset::Minilm => local("sentence-transformers/all-MiniLM-L6-v2"),
-            Preset::Qwen3 => local("Qwen/Qwen3-Embedding-0.6B"),
-            Preset::Potion => local("minishlab/potion-base-8M"),
+            Preset::Minilm => local("sentence-transformers/all-MiniLM-L6-v2")?,
+            Preset::Qwen3 => local("Qwen/Qwen3-Embedding-0.6B")?,
+            Preset::Potion => local("minishlab/potion-base-8M")?,
             Preset::Openai => EmbedConfig::new(
                 "https://api.openai.com/v1".into(),
                 "text-embedding-3-small".into(),
@@ -94,6 +101,11 @@ struct EmbedArgs {
 }
 
 impl EmbedArgs {
+    /// Any embedding feature is on.
+    fn enabled(&self) -> bool {
+        self.embeddings || self.code_enabled()
+    }
+
     /// Whole-unit embeddings are on for `--embed-code` and for any `--embed <preset>`.
     fn code_enabled(&self) -> bool {
         self.embed_code || self.embed.is_some()
@@ -113,6 +125,27 @@ impl EmbedArgs {
             return Ok(());
         }
         let cfg = self.config()?;
+        // say where the text goes BEFORE anything is sent
+        if cfg.is_loopback() {
+            eprintln!(
+                "embedding {} units via {} (this machine)",
+                units.len(),
+                cfg.host()
+            );
+        } else {
+            eprintln!(
+                "embedding {} units: unit text is sent to {} (model {})",
+                units.len(),
+                cfg.host(),
+                cfg.deployment
+            );
+            if cfg.is_cleartext_remote() {
+                eprintln!(
+                    "warning: {} is plain http, so your API key and source text travel unencrypted",
+                    cfg.endpoint
+                );
+            }
+        }
         let path = self
             .embed_cache
             .clone()
@@ -161,6 +194,30 @@ impl EmbedArgs {
             w
         }
     }
+}
+
+/// Units under the options' size/kind filters can never be reported, so there is no reason to embed
+/// (upload) them.
+fn retain_matchable(
+    units: &mut Vec<duplicatecode_engine::Unit>,
+    min_tokens: usize,
+    skip_tests: bool,
+) {
+    units.retain(|u| u.token_count() >= min_tokens && !u.boilerplate && !(skip_tests && u.is_test));
+}
+
+/// Units of every root; with several roots the file names carry the root so equal names stay apart.
+fn load_roots(paths: &[PathBuf], exclude: &[String]) -> Vec<duplicatecode_engine::Unit> {
+    let mut units = Vec::new();
+    for p in paths {
+        for mut u in load_units_with(p, exclude) {
+            if paths.len() > 1 {
+                u.file = format!("{}/{}", p.display(), u.file);
+            }
+            units.push(u);
+        }
+    }
+    units
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -397,7 +454,7 @@ enum Cmd {
     EvalGroups {
         #[arg(long, default_value = "eval/data/codenet")]
         root: PathBuf,
-        /// Print only the final `score=` line.
+        /// Print only the summary lines (`dataset_score`, `dataset_threshold`, `score=`).
         #[arg(long)]
         quiet: bool,
         /// Write every pair's feature vector (TSV) for offline analysis.
@@ -548,6 +605,10 @@ fn main() -> Result<()> {
                 }));
             }
             let mut corpus_units = load_units(&repo);
+            if embed.enabled() {
+                retain_matchable(&mut corpus_units, min_tokens, false);
+                retain_matchable(&mut queries, min_tokens, false);
+            }
             embed.apply(&mut corpus_units)?;
             embed.apply(&mut queries)?;
             let corpus = Corpus::new(corpus_units);
@@ -615,6 +676,9 @@ fn main() -> Result<()> {
                     src.insert(u.file.clone(), real);
                     units.push(u);
                 }
+            }
+            if embed.enabled() {
+                units.retain(|u| !u.boilerplate && !(skip_tests && u.is_test));
             }
             embed.apply(&mut units)?;
             let o = review::ReviewOptions {
@@ -711,10 +775,7 @@ fn main() -> Result<()> {
             cross_file,
             json,
         } => {
-            let mut units = Vec::new();
-            for p in &paths {
-                units.extend(load_units_with(p, &exclude));
-            }
+            let mut units = load_roots(&paths, &exclude);
             units.retain(|u| !u.boilerplate && !(skip_tests && u.is_test));
             let mut found = duplicatecode_engine::fragments::find_fragments(
                 &units,
@@ -760,10 +821,7 @@ fn main() -> Result<()> {
             json,
         } => {
             embed.embed_code = true; // searching by description needs unit embeddings
-            let mut units = Vec::new();
-            for p in &paths {
-                units.extend(load_units_with(p, &exclude));
-            }
+            let mut units = load_roots(&paths, &exclude);
             units.retain(|u| u.token_count() >= min_tokens && !u.boilerplate);
             embed.apply(&mut units)?;
             let cfg = embed.config()?;
@@ -814,14 +872,9 @@ fn main() -> Result<()> {
         } => {
             let threshold =
                 threshold.unwrap_or(profile.default_threshold(Command::Scan, embed.code_enabled()));
-            let mut units = Vec::new();
-            for p in &paths {
-                for mut u in load_units_with(p, &exclude) {
-                    if paths.len() > 1 {
-                        u.file = format!("{}/{}", p.display(), u.file);
-                    }
-                    units.push(u);
-                }
+            let mut units = load_roots(&paths, &exclude);
+            if embed.enabled() {
+                retain_matchable(&mut units, min_tokens, skip_tests);
             }
             embed.apply(&mut units)?;
             let corpus = Corpus::new(units.clone());
@@ -851,14 +904,23 @@ fn main() -> Result<()> {
                 .collect();
             pairs.sort_by(|a, b| b.scores.combined.total_cmp(&a.scores.combined));
             let groups = group_pairs(&pairs);
-            let by_place: std::collections::HashMap<String, &duplicatecode_engine::Unit> = units
+            // keyed by the full place: units that start on the same line (minified code, one-line
+            // classes) must not be mixed up
+            let place = |r: &duplicatecode_engine::index::UnitRef| {
+                (r.file.clone(), r.start_line, r.end_line, r.name.clone())
+            };
+            let by_place: std::collections::HashMap<_, &duplicatecode_engine::Unit> = units
                 .iter()
-                .map(|u| (format!("{}:{}", u.file, u.start_line), u))
+                .map(|u| {
+                    (
+                        (u.file.clone(), u.start_line, u.end_line, u.name.clone()),
+                        u,
+                    )
+                })
                 .collect();
             let explanation = |m: &duplicatecode_engine::Match| {
-                let a = by_place.get(&format!("{}:{}", m.query.file, m.query.start_line))?;
-                let b =
-                    by_place.get(&format!("{}:{}", m.candidate.file, m.candidate.start_line))?;
+                let a = by_place.get(&place(&m.query))?;
+                let b = by_place.get(&place(&m.candidate))?;
                 Some(duplicatecode_engine::explain::explain(a, b))
             };
             if pairs_out {

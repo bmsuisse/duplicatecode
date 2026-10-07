@@ -1,11 +1,11 @@
 ---
 name: duplicate-code-review
-description: Find duplicated or near-duplicated code (Python, TypeScript/TSX, C#) in a repo or monorepo folder, or check whether new code re-implements something that already exists, using the `duplicatecode` CLI. Use when asked to find/report duplicates, dead-weight copy-paste, "did we already write this", or to review a diff/PR for duplication. Cheap and fast; ranks candidates so you only read the promising ones.
+description: Find duplicated or near-duplicated code (Python, TypeScript/JavaScript incl. TSX/JSX, SQL, C#) in a repo or monorepo folder, or check whether new code re-implements something that already exists, using the `duplicatecode` CLI (also finds copied blocks inside different functions and, with embeddings, existing code by description). Use when asked to find/report duplicates, dead-weight copy-paste, "did we already write this", or to review a diff/PR for duplication. Cheap and fast; ranks candidates so you only read the promising ones.
 ---
 
 # Duplicate code review with `duplicatecode`
 
-`duplicatecode` is a static (LLM-free) detector. It parses code into functions/methods/classes/components/module-level values, normalizes them (identifiers, literals, comments, docstrings, type annotations, debug logging ignored; comprehensions read as loops), and scores pairs on structure, statements, literals, API calls and name similarity. **It finds candidates; you decide.** In tests it found ~90% of the duplicates a Sonnet-class reviewer found by reading, in a tenth of the tool calls, but only 30–50% of its raw pairs are real duplicates — the value you add is verification and pruning.
+`duplicatecode` is static by default (no LLM, no network); `--embed*` is optional, and the hosted presets (`--embed openai|cohere`, or `--embed-code` against a hosted endpoint) upload unit source text to the provider, so use them only where that is allowed (local presets `minilm|qwen3|potion` talk to a loopback server). It parses code into functions/methods/classes/components/module-level values (SQL: statements), normalizes them (identifiers, literals, comments, docstrings, type annotations, debug logging ignored; comprehensions read as loops), and scores pairs on structure, statements, literals, API calls and name similarity. **It finds candidates; you decide.** In tests it found ~90% of the duplicates a Sonnet-class reviewer found by reading, in a tenth of the tool calls, but only 30–50% of its raw pairs are real duplicates — the value you add is verification and pruning.
 
 Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build: `cargo build --release`).
 
@@ -26,10 +26,12 @@ Binary: `duplicatecode` on PATH, or `<repo>/target/release/duplicatecode` (build
 4. **Widen for recall** (the first pass is precision-leaning):
    ```
    duplicatecode review <folder> --brief --threshold 0.35 --min-name 0 --min-lines 3 --max-groups 150
+   duplicatecode review <folder> --brief --profile reimpl --min-name 0 --max-groups 150   # renamed rewrites; own default threshold 0.30
    ```
-   Skim only groups you have not seen. `--min-name 0` also lists look-alikes with unrelated names (finds renamed re-implementations, noisier). Then repeat step 1 without `--skip-tests` if tests matter (identical helpers copied between test files are real but low priority).
-5. **Look for what a static tool cannot see** (same purpose, different code): pick 4–8 common helper families (format/parse/normalize/slug/debounce/retry/pagination/date/currency/size/auth/fetch-wrapper/query-client/logger setup/pick/label…), `grep -rn "function <family>\|def <family>"` across the folder, and compare implementations by reading. Also check **module-level setup blocks** repeated across apps/packages (client/config construction).
-6. **Report** (format below). Verify each reported group by reading every member — never report from scores alone.
+   Skim only groups you have not seen. `--min-name 0` also lists look-alikes with unrelated names (finds renamed re-implementations, noisier). Note `--threshold 0.35` is a loose cut-off for the default `copies` profile (default 0.45 for `review`); `reimpl` has its own, lower defaults, so do not copy `copies` numbers onto it. Then repeat step 1 without `--skip-tests` if tests matter (identical helpers copied between test files are real but low priority).
+5. **Copied blocks inside different functions** (whole-unit review/scan miss these because the surrounding functions differ): `duplicatecode fragments <folders> [--cross-file] [--min-stmts 4] [--min-tokens 30] [--json]`; read both sides, then extract the shared block.
+6. **Look for what a static tool cannot see** (same purpose, different code): pick 4–8 common helper families (format/parse/normalize/slug/debounce/retry/pagination/date/currency/size/auth/fetch-wrapper/query-client/logger setup/pick/label…), `grep -rn "function <family>\|def <family>"` across the folder, and compare implementations by reading. Also check **module-level setup blocks** repeated across apps/packages (client/config construction).
+7. **Report** (format below). Verify each reported group by reading every member — never report from scores alone.
 
 **Coverage rule.** The tool's list is the recall; your job is to prune it. A repo typically has 100–500 groups, of which 30–50% of the IDENTICAL/NEAR-COPY ones are real. Do not stop after the top few dozen: page through *every* IDENTICAL and NEAR-COPY group with `--brief`, decide each from its line (name, hints, members) and open detail only when unsure, then report every group you judged real (respect a reporting cap if you were given one, best first). Missing a real copy is worse than spending a few more tool calls.
 
@@ -47,10 +49,12 @@ Strong positives: identical or near-identical helpers copied between packages (`
 
 ## Other commands
 
-- `duplicatecode scan <folders> [--pairs] [--json] [--skip-tests] [--fail-on-found]` – raw groups/pairs (CI-friendly; exits 1 when found with `--fail-on-found`).
-- `git diff origin/main | duplicatecode diff --repo . [--threshold 0.4]` – does the *new* code re-implement something existing? (default threshold 0.4; about half of independent re-implementations score ≥ 0.4 — lower to 0.3 if you must not miss, and read the hits.)
-- `--profile reimpl --min-name 0` – structure-heavy scoring for renamed rewrites (experimental; noisier).
-- `--embeddings` – adds semantic name similarity (Azure AI Foundry / Azure OpenAI / OpenAI-compatible; needs `AZURE_AI_FOUNDRY_ENDPOINT` + `AZURE_AI_FOUNDRY_API_KEY` or `az login`; vectors cached in `~/.cache/duplicatecode/embeddings.bin`). Use when helpers have different names for the same idea. `duplicatecode embed-test a b` checks setup.
+- `duplicatecode scan <folders> [--pairs] [--explain] [--json] [--skip-tests] [--fail-on-found]` – raw groups/pairs (CI-friendly; exits 1 when found with `--fail-on-found`). `scan --pairs --explain` shows what differs (literals, calls, unmatched lines), i.e. what to parameterize when extracting the shared part.
+- `duplicatecode fragments <paths> [--min-stmts N] [--min-tokens N] [--cross-file] [--json]` – runs of identical normalized statements shared by two different functions.
+- `duplicatecode find "<description>" <paths> [--top 5] [--json]` – needs an embedding provider (e.g. `--embed minilm`, local). Use it for "did we already write this?" **before grepping**. It embeds every unit under the given paths (uploaded if the provider is hosted).
+- `git diff origin/main | duplicatecode diff --repo . [--threshold 0.4]` – does the *new* code re-implement something existing? (default threshold 0.4; about half of independent re-implementations score ≥ 0.4 — lower to 0.3 if you must not miss, and read the hits.) With `--profile reimpl` the defaults are lower (scan 0.35, diff 0.28, review 0.30; +0.07 when embeddings are on).
+- `--profile reimpl --min-name 0` – structure-heavy scoring for renamed rewrites; its scores live lower than `copies`, hence its own default thresholds above (about 0.1% / 1% false alarms on unrelated code at scan / diff defaults in the benchmarks); expect more noise than `copies`.
+- `--embed <preset>` (`minilm|qwen3|potion` local, `openai|cohere` hosted) / `--embed-code` – embed whole-unit text and blend the cosine into the score (`--embed-weight`, default 0.35); finds same-purpose code that shares no tokens. `--embeddings` embeds names only. Local presets need the local server (`eval/embed_server.py`, default `127.0.0.1:8099`); vectors are cached in `~/.cache/duplicatecode/embeddings.bin`. `duplicatecode embed-test a b` checks setup.
 
 ## Report format
 

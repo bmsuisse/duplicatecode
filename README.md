@@ -1,6 +1,6 @@
 # duplicatecode
 
-Static (LLM-free) detection of duplicate / similar code in Python, TypeScript/JavaScript (TSX/JSX), SQL and C#,
+Static by default (LLM-free, no network unless `--embed*` is used) detection of duplicate / similar code in Python, TypeScript/JavaScript (TSX/JSX), SQL and C#,
 aimed at catching an LLM re-implementing something that already exists. Input can be a git diff
 checked against existing source.
 
@@ -56,7 +56,14 @@ duplicatecode find "retry with exponential backoff" src/   # does something like
 
 ## Embeddings (bring your own key)
 
-Two optional signals, both off by default (the detector stays LLM-free unless you ask):
+Two optional signals, both off by default (the detector stays static and offline unless you ask).
+
+> **Privacy warning.** `--embed openai`, `--embed cohere`, and `--embed-code` / `--embeddings` pointed at any
+> hosted endpoint (OpenAI, Cohere, Azure, ...) **upload the source text of your units** to that provider
+> (`--embeddings` sends identifier names only). `find` embeds **every unit under the given paths**, so
+> `find ... --embed openai` uploads all of it. The local presets (`minilm`, `qwen3`, `potion`) are meant for a
+> server on loopback (default `127.0.0.1:8099`; `DUPLICATECODE_EMBED_ENDPOINT` overrides it): pointing that
+> variable at a remote host sends text there too. Do not use hosted embeddings on code you may not share.
 
 - `--embeddings` embeds identifier *names* (cheap) as an extra name-similarity signal.
 - `--embed <preset>` is the short form (`minilm`, `qwen3`, `potion`, `openai`, `cohere`; `qwen3` is about 5x slower than `minilm` on CPU, so use it with a GPU or prefer `minilm`) and implies
@@ -205,9 +212,9 @@ Self-scans of three internal repositories (Python + TypeScript), 189 pairs judge
   before trusting them. A structure-heavy `--profile reimpl` exists for renamed re-implementations
   (use with `--min-name 0`) but has no real-repo precision data yet.
 
-### Fresh held-out check (copies profile, threshold 0.6)
+### Fresh held-out check (copies profile, threshold 0.6 = the `copies` default for `scan`)
 
-A third, untouched sample of 57 pairs (nothing was tuned on it): 30% true duplicates, 47% incl. partial
+A third, untouched sample of 57 pairs (nothing was tuned on it; the `reimpl` profile has different defaults, 0.35 for `scan`, and is not covered by this sample): 30% true duplicates, 47% incl. partial
 (OneSales 0/24, MDMApp 11/24, CCMT2 6/9 true). The 50%/76% above was optimistic because it was measured on the
 pairs used to choose the weights. Test code is about half of the noise but also holds real copies
 (25% true either way), so it is kept by default; `--skip-tests` drops it.
@@ -225,7 +232,7 @@ by Haiku and Sonnet without seeing the repo. Fraction where the original is foun
 | 0.5 | 45% | 14% | 30% | 1% |
 | 0.6 | 24% | 5% | 14% | 0% |
 
-So `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6. About half of
+So with the `copies` profile `diff` (checking new code) defaults to threshold 0.4 while `scan` (existing copies) defaults to 0.6; the `reimpl` profile has its own lower defaults (see above). About half of
 independent re-implementations are caught; the rest are genuinely different code. The structure-heavy `reimpl`
 profile is not better on this test.
 
@@ -242,7 +249,7 @@ read/grep, two with this CLI. All distinct groups (82) were then judged blind by
 | OneSales, with CLI | 21 | 10 | 48% / 86% | 67% | 9 |
 
 Only 18 of 82 groups were found by both, so the approaches are complementary. The agents' reports are capped at 30
-groups, so the raw tool is a better measure of recall: `scan --threshold 0.6` (defaults) finds 38 of the 40 judged
+groups, so the raw tool is a better measure of recall: `scan --threshold 0.6` (the `copies` defaults) finds 38 of the 40 judged
 true duplicates (25/25 MDMApp, 13/15 OneSales) and 23 of the 25 that the LLM-only agents found independently.
 What it still misses: a differently-written picker function (same purpose, different code) and a formatFileSize
 variant with different constants. Fixed after this test: tiny same-name exact copies (`min_tokens` 20 -> 8, near-exact

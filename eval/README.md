@@ -34,6 +34,14 @@ python3 eval/make_fn_data.py dataset eval/data/codenet eval/data/holdout
 duplicatecode eval-groups                              # dev
 duplicatecode eval-groups --root eval/data/holdout     # holdout
 duplicatecode eval-groups --dump pairs.tsv             # per-pair feature vectors for offline fitting
+
+# fragment-level clones (pasted blocks): inject renamed blocks into real functions, then score recall
+python3 eval/make_fragment_data.py <python repo> /tmp/frag --pairs 60 --block 6
+uv run --no-project --python 3.12 eval/make_fragment_data_ts.py <ts repo> /tmp/fragts --pairs 60 --block 6
+python3 eval/eval_fragments.py /tmp/frag duplicatecode --min-stmts 4 --min-tokens 30
+
+# `duplicatecode find` (search by description): task descriptions as queries over implementation units
+python3 eval/eval_find.py dataset duplicatecode [extra distractor dirs]
 ```
 
 `eval/data/` is git-ignored. The React set is built from private code and stays local.

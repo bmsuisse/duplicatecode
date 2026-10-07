@@ -173,14 +173,19 @@ The Qwen3 run with distractors was still in progress when this was written.
 Benchmark (`eval/make_fragment_data.py`, `eval/eval_fragments.py`): a renamed block of N consecutive
 statements from one real function (Fabricks.Runtime) is pasted into a different function; the detector
 must report that pair with at least half the block overlapping. Constructors/dunders are excluded because
-the tool ignores them by design.
+the tool ignores them by design (Python set: Fabricks.Runtime, 111 candidate functions).
 
-| block size | recall at 5 stmts / 40 tokens | recall at 4 stmts / 30 tokens (default) |
-| --- | --- | --- |
-| 4 | 0.43 | 0.80 |
-| 6 | 0.86 | 0.93 |
-| 8 | 0.97 | 0.97 |
-| 10 | 0.89 | 0.95 |
+| block size | Python: 5 stmts / 40 tokens | Python: 4 / 30 (default) | TypeScript/TSX: 5 / 40 | TypeScript/TSX: 4 / 30 (default) |
+| --- | --- | --- | --- | --- |
+| 4 | 0.43 | 0.80 | 0.33 | 0.84 |
+| 6 | 0.86 | 0.93 | 0.95 | 0.975 |
+| 8 | 0.97 | 0.97 | 0.97 | 0.97 |
+| 10 | 0.89 | 0.95 | n/a | n/a |
+
+The TypeScript set (`eval/make_fragment_data_ts.py`, run under Python 3.12 because the tree-sitter
+TypeScript package has no free-threaded 3.14 wheel) pastes renamed statement blocks between real
+`function_declaration`s from OneSales/frontend; it has 94 candidate functions, so the numbers are noisy
+(40 / 45 / 31 injected pairs for blocks 6 / 4 / 8). SQL fragments are not benchmarked.
 
 Sampled non-injected reports were real duplicates in the repo (the same secret-handling block, the same
 forecasting steps, `get_receivers` copied across three email providers), not noise. One bug found

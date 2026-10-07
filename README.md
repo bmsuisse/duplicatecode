@@ -90,6 +90,76 @@ duplicatecode scan . --embed-code              # whole-unit embeddings
 duplicatecode scan . --embeddings              # names only
 ```
 
+## API
+
+### Command line
+
+| command | what it does |
+| --- | --- |
+| `scan <paths>` | similar units inside one or more folders; `--pairs`, `--explain`, `--json`, `--fail-on-found` |
+| `diff` | check code added in a git diff (stdin or `--diff`) against the repo (`--repo`) |
+| `review` | ranked candidates for a diff, for a human or an agent to judge |
+| `fragments <paths>` | copied blocks of identical statements inside different functions |
+| `find "<description>" <paths>` | existing units closest to a plain-language description (needs embeddings) |
+| `units <path>` / `show file:10-40` | list extracted units / print a unit's source |
+| `embed-test <names...>` | check the embedding provider and calibrate `--embed-floor` |
+| `eval-groups`, `bench`, `make-mutation-groups` | evaluation (see `eval/README.md`) |
+
+Shared options: `--profile copies|reimpl`, `--threshold`, `--min-tokens`, `--min-lines`, `--exclude`, `--skip-tests`,
+`--cross-file`, `--json`. Embedding options (all off by default): `--embed <preset>`, `--embed-code`,
+`--embed-weight`, `--embed-max-chars`, `--embeddings`, `--embed-cache`, `--embed-dims`.
+
+```sh
+duplicatecode scan . --profile reimpl --min-name 0 --embed minilm --pairs --explain
+duplicatecode fragments src/ --min-stmts 4 --min-tokens 30 --cross-file --json
+duplicatecode find "retry with exponential backoff" src/ --top 5 --json
+duplicatecode diff --repo . < change.diff --embed openai
+```
+
+JSON output:
+
+- `find --json`: `[{score, file, name, kind, start_line, end_line}]`
+- `fragments --json`: `[{a, b, statements, tokens}]` with `a`/`b` = `{file, unit, start_line, end_line, coverage}`
+- `scan --pairs --json`: `[{query, candidate, scores}]`; with `--explain`: `[{match, explanation}]`
+- `scan --json` (groups): `[{score, units: [{file, name, kind, start_line, end_line}]}]`
+
+`scan --fail-on-found` exits with status 1 when anything is reported, for CI.
+
+### Rust library
+
+The engine crate `duplicatecode-engine` is what the CLI uses:
+
+```rust
+use duplicatecode_engine::embed::{embed_unit_code, EmbedConfig, EmbeddingCache};
+use duplicatecode_engine::explain::explain;
+use duplicatecode_engine::fragments::{find_fragments, FragmentOptions};
+use duplicatecode_engine::index::Weights;
+use duplicatecode_engine::{find_matches, load_units_with, Corpus, MatchOptions};
+
+let mut units = load_units_with(Path::new("src/"), &[]);
+
+// optional: embed every unit; units without a vector simply skip the embedding term
+let cfg = EmbedConfig::from_env(None).ok_or("no embedding provider configured")?;
+let mut cache = EmbeddingCache::load(&EmbeddingCache::default_path());
+embed_unit_code(&mut units, &cfg, &mut cache, 3000)?;
+
+// pairs: queries against a corpus
+let weights = Weights::default().with_embed(0.35); // 0.0 = static only
+let corpus = Corpus::new(units.clone());
+let pairs = find_matches(&units, &corpus, MatchOptions { weights, threshold: 0.42, ..Default::default() });
+
+// copied blocks, and what differs inside a pair
+let blocks = find_fragments(&units, FragmentOptions::default());
+println!("{}", explain(&units[0], &units[1]).summary());
+```
+
+### Not built yet
+
+Planned, not available today: a `.duplicatecode.toml` with an `[embed]` section; `--embed-optional` (warn and
+fall back to the static score when the provider is unreachable; today an unreachable provider is an error);
+`--allow-upload` (required for the hosted presets, which send source text out); a `duplicatecode[embed]` Python
+extra that starts the local server on demand; an `Embedder` trait so providers can plug in without HTTP.
+
 ## How it works
 
 Units (functions, methods, classes, arrow-function components) are extracted with tree-sitter and

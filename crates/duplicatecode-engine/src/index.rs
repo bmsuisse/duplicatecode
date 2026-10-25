@@ -1,7 +1,8 @@
 //! Scoring and matching of query units against a corpus.
 
 use crate::similarity::{
-    containment, cosine, dot, jaccard, lcs_ratio, multiset_dice, weighted_jaccard,
+    containment_sorted, cosine_normed, dot, inter_count, jaccard, jaccard_sorted, lcs_ratio,
+    multiset_dice, weighted_jaccard_sorted,
 };
 use crate::units::Unit;
 use std::collections::HashMap;
@@ -195,10 +196,7 @@ pub struct Idf {
 
 impl Idf {
     pub fn from_units(units: &[Unit]) -> Idf {
-        fn table<'a>(
-            sets: impl Iterator<Item = &'a std::collections::BTreeSet<u64>>,
-            n: usize,
-        ) -> HashMap<u64, f64> {
+        fn table<'a>(sets: impl Iterator<Item = &'a Vec<u64>>, n: usize) -> HashMap<u64, f64> {
             let mut df: HashMap<u64, u32> = HashMap::new();
             for s in sets {
                 for g in s {
@@ -251,15 +249,13 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
     let idf_weight = |table: fn(&Idf) -> &HashMap<u64, f64>| {
         move |g: &u64| idf.and_then(|i| table(i).get(g)).copied().unwrap_or(1.0)
     };
-    let ngram = |x: &std::collections::BTreeSet<u64>,
-                 y: &std::collections::BTreeSet<u64>,
-                 table: fn(&Idf) -> &HashMap<u64, f64>| match idf {
-        Some(_) => weighted_jaccard(x, y, idf_weight(table)),
-        None => jaccard(x, y),
+    let ngram = |x: &[u64], y: &[u64], table: fn(&Idf) -> &HashMap<u64, f64>| match idf {
+        Some(_) => weighted_jaccard_sorted(x, y, idf_weight(table)),
+        None => jaccard_sorted(x, y),
     };
     // structural and containment both need |A ∩ B| of the same 4-gram sets: count it once
     let shared_fp = (need(FEAT_STRUCTURAL) && need(FEAT_CONTAINMENT))
-        .then(|| a.fingerprint.intersection(&b.fingerprint).count());
+        .then(|| inter_count(&a.fingerprint, &b.fingerprint));
     let mut s = Scores {
         structural: if need(FEAT_STRUCTURAL) {
             match shared_fp {
@@ -286,13 +282,13 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             match shared_fp {
                 Some(inter) if m > 0 => inter as f64 / m as f64,
                 Some(_) => 0.0,
-                None => containment(&a.fingerprint, &b.fingerprint),
+                None => containment_sorted(&a.fingerprint, &b.fingerprint),
             }
         } else {
             0.0
         },
         kinds: if need(FEAT_KINDS) {
-            cosine(&a.kinds, &b.kinds)
+            cosine_normed(&a.kinds, a.kinds_norm, &b.kinds, b.kinds_norm)
         } else {
             0.0
         },
@@ -776,7 +772,7 @@ mod tests {
             .flat_map(|(i, s)| units(&format!("{i}.py"), s))
             .collect();
         all[1].fingerprint = (1..9u64).map(|i| i << 40).collect();
-        assert!(all[0].fingerprint.is_disjoint(&all[1].fingerprint));
+        assert_eq!(inter_count(&all[0].fingerprint, &all[1].fingerprint), 0);
         let corpus = Corpus::new(all.clone());
         for (name, weights) in [
             ("reimpl", Weights::default()),

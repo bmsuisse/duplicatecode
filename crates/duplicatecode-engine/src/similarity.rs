@@ -10,6 +10,72 @@ pub fn jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
     inter as f64 / union as f64
 }
 
+/// |A ∩ B| of two sorted, duplicate-free slices (merge walk).
+pub fn inter_count(a: &[u64], b: &[u64]) -> usize {
+    let (mut i, mut j, mut n) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                n += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    n
+}
+
+/// [`jaccard`] on sorted slices.
+pub fn jaccard_sorted(a: &[u64], b: &[u64]) -> f64 {
+    let inter = inter_count(a, b);
+    let union = a.len() + b.len() - inter;
+    if union == 0 {
+        return 0.0;
+    }
+    inter as f64 / union as f64
+}
+
+/// [`containment`] on sorted slices.
+pub fn containment_sorted(a: &[u64], b: &[u64]) -> f64 {
+    let m = a.len().min(b.len());
+    if m == 0 {
+        return 0.0;
+    }
+    inter_count(a, b) as f64 / m as f64
+}
+
+/// [`weighted_jaccard`] on sorted slices (same summation order).
+pub fn weighted_jaccard_sorted(a: &[u64], b: &[u64], w: impl Fn(&u64) -> f64) -> f64 {
+    let (mut inter, mut union) = (0.0, 0.0);
+    let mut j = 0;
+    for x in a {
+        let wx = w(x);
+        union += wx;
+        while j < b.len() && b[j] < *x {
+            j += 1;
+        }
+        if j < b.len() && b[j] == *x {
+            inter += wx;
+        }
+    }
+    let mut i = 0;
+    for y in b {
+        while i < a.len() && a[i] < *y {
+            i += 1;
+        }
+        if !(i < a.len() && a[i] == *y) {
+            union += w(y);
+        }
+    }
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
 /// Dot product of two equal-length vectors (cosine for unit-length ones); `None` on a length mismatch.
 pub fn dot(x: &[f32], y: &[f32]) -> Option<f64> {
     (x.len() == y.len()).then(|| {
@@ -49,6 +115,28 @@ pub fn containment<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
         return 0.0;
     }
     a.intersection(b).count() as f64 / m as f64
+}
+
+/// Euclidean norm of a count histogram.
+pub fn norm(a: &BTreeMap<String, u32>) -> f64 {
+    a.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt()
+}
+
+/// [`cosine`] with the norms already known.
+pub fn cosine_normed(
+    a: &BTreeMap<String, u32>,
+    na: f64,
+    b: &BTreeMap<String, u32>,
+    nb: f64,
+) -> f64 {
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    let dot: f64 = a
+        .iter()
+        .filter_map(|(k, x)| b.get(k).map(|y| *x as f64 * *y as f64))
+        .sum();
+    dot / (na * nb)
 }
 
 /// Cosine similarity of two count histograms.

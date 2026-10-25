@@ -32,10 +32,10 @@ pub struct Unit {
     /// Lower-cased names of called functions/methods.
     pub callees: BTreeSet<String>,
     #[serde(skip)]
-    pub fingerprint: BTreeSet<u64>,
+    pub fingerprint: Vec<u64>,
     /// Looser fingerprint: 2-grams of the same token stream.
     #[serde(skip)]
-    pub fingerprint2: BTreeSet<u64>,
+    pub fingerprint2: Vec<u64>,
     /// Notable literals (numbers, short strings), excluding trivial ones like 0/1/"".
     #[serde(skip)]
     pub literals: BTreeSet<String>,
@@ -45,6 +45,9 @@ pub struct Unit {
     /// Histogram of syntax-node kinds (bag of structure).
     #[serde(skip)]
     pub kinds: BTreeMap<String, u32>,
+    /// Euclidean norm of `kinds`, cached for the cosine.
+    #[serde(skip)]
+    pub kinds_norm: f64,
     /// Multiset of normalized statement hashes (order-insensitive, header-only for compound statements).
     #[serde(skip)]
     pub stmts_exact: BTreeMap<u64, u32>,
@@ -671,6 +674,7 @@ impl Ctx<'_> {
             fingerprint2,
             literals,
             api,
+            kinds_norm: crate::similarity::norm(&kinds),
             kinds,
             stmts_exact,
             stmts_shape,

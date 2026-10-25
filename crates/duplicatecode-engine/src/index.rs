@@ -432,6 +432,9 @@ fn same_place(a: &Unit, b: &Unit) -> bool {
     a.file == b.file && a.start_line <= b.end_line && b.start_line <= a.end_line
 }
 
+/// Name similarity from which a candidate counts as name-matching (the default `--min-name`).
+const NAME_PREFERRED: f64 = 0.3;
+
 /// A searchable set of units with an inverted index over their k-gram fingerprints.
 pub struct Corpus {
     units: Vec<Unit>,
@@ -608,7 +611,25 @@ impl Corpus {
                 .total_cmp(&a.1.combined)
                 .then_with(|| (&a.0.file, a.0.start_line).cmp(&(&b.0.file, b.0.start_line)))
         });
-        hits.truncate(opts.top_n);
+        if opts.min_name < NAME_PREFERRED {
+            // name gate off: unrelated-name look-alikes would otherwise push name-matching
+            // candidates out of the top N, so also keep the best name-matching ones (the set a
+            // gated run would have returned)
+            let mut kept = 0;
+            let mut rank = 0;
+            hits.retain(|h| {
+                rank += 1;
+                if rank <= opts.top_n {
+                    kept += usize::from(h.1.name >= NAME_PREFERRED);
+                    return true;
+                }
+                let keep = h.1.name >= NAME_PREFERRED && kept < opts.top_n;
+                kept += usize::from(keep);
+                keep
+            });
+        } else {
+            hits.truncate(opts.top_n);
+        }
         hits
     }
 }

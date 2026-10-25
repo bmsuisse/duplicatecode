@@ -451,6 +451,9 @@ enum Cmd {
         /// Default 0.3 for `copies`, 0 for `reimpl`.
         #[arg(long)]
         min_name: Option<f64>,
+        /// Best matches kept per unit before pairing (more = fewer pairs lost to look-alikes).
+        #[arg(long, default_value_t = 3)]
+        top_n: usize,
         /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
         /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
@@ -914,6 +917,7 @@ fn main() -> Result<()> {
             threshold,
             min_tokens,
             min_name,
+            top_n,
             profile,
             idf,
             min_lines,
@@ -935,7 +939,7 @@ fn main() -> Result<()> {
             let opts = MatchOptions {
                 threshold,
                 min_tokens,
-                top_n: 3,
+                top_n,
                 min_name: min_name.unwrap_or(profile.default_min_name()),
                 min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 skip_tests,

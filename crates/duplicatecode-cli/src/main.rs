@@ -249,6 +249,13 @@ impl Profile {
     /// judged real pairs and are left alone.
     /// The name gate hides renamed re-implementations (no shared name subword = never scored),
     /// which is exactly what `reimpl` looks for.
+    fn default_min_lines(self) -> u32 {
+        match self {
+            Profile::Copies => 6,
+            Profile::Reimpl => 12,
+        }
+    }
+
     fn default_min_name(self) -> f64 {
         match self {
             Profile::Copies => 0.3,
@@ -324,9 +331,10 @@ enum Cmd {
         /// calibration; experimental.
         #[arg(long)]
         idf: bool,
-        /// Ignore units shorter than this many lines.
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        /// Units shorter than this only match as near-exact same-name copies. Default 6 for
+        /// `copies`, 12 for `reimpl` (with the name gate off, tiny wrappers flood the results).
+        #[arg(long)]
+        min_lines: Option<u32>,
         #[arg(long)]
         json: bool,
     },
@@ -344,8 +352,8 @@ enum Cmd {
         threshold: Option<f64>,
         #[arg(long)]
         min_name: Option<f64>,
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        #[arg(long)]
+        min_lines: Option<u32>,
         #[arg(long)]
         skip_tests: bool,
         #[arg(long, default_value_t = 40)]
@@ -451,9 +459,10 @@ enum Cmd {
         /// calibration; experimental.
         #[arg(long)]
         idf: bool,
-        /// Ignore units shorter than this many lines.
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        /// Units shorter than this only match as near-exact same-name copies. Default 6 for
+        /// `copies`, 12 for `reimpl` (with the name gate off, tiny wrappers flood the results).
+        #[arg(long)]
+        min_lines: Option<u32>,
         /// Ignore test code (about half of the noise in the judged repos, but also some real copies).
         #[arg(long)]
         skip_tests: bool,
@@ -655,7 +664,7 @@ fn main() -> Result<()> {
                 threshold,
                 min_tokens,
                 min_name: min_name.unwrap_or(profile.default_min_name()),
-                min_lines,
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 weights: embed.weights(profile.weights()),
                 use_idf: idf,
                 ..Default::default()
@@ -725,7 +734,7 @@ fn main() -> Result<()> {
             let o = review::ReviewOptions {
                 threshold,
                 min_name: min_name.unwrap_or(profile.default_min_name()),
-                min_lines,
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 skip_tests,
                 max_groups,
                 offset,
@@ -928,7 +937,7 @@ fn main() -> Result<()> {
                 min_tokens,
                 top_n: 3,
                 min_name: min_name.unwrap_or(profile.default_min_name()),
-                min_lines,
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 skip_tests,
                 weights: embed.weights(profile.weights()),
                 use_idf: idf,

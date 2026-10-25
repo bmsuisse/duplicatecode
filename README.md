@@ -133,7 +133,7 @@ Shared options: `--profile copies|reimpl`, `--threshold`, `--min-tokens`, `--min
 `--embed-weight`, `--embed-max-chars`, `--embeddings`, `--embed-cache`, `--embed-dims`.
 
 ```sh
-duplicatecode scan . --profile reimpl --min-name 0 --embed minilm --pairs --explain
+duplicatecode scan . --profile reimpl --embed minilm --pairs --explain
 duplicatecode fragments src/ --min-stmts 4 --min-tokens 30 --cross-file --json
 duplicatecode find "retry with exponential backoff" src/ --top 5 --json
 duplicatecode diff --repo . < change.diff --embed openai
@@ -226,7 +226,8 @@ Self-scans of three internal repositories (Python + TypeScript), 189 pairs judge
   judged sample gives ~50% true duplicates and ~76% incl. partial while keeping ~70% of the true ones.
   These numbers are partly in-sample (weights and filters were chosen on the same pairs) — re-judge a fresh sample
   before trusting them. A structure-heavy `--profile reimpl` exists for renamed re-implementations
-  (use with `--min-name 0`) but has no real-repo precision data yet.
+  (implies `--min-name 0` and `--min-lines 12`; on a 11k-unit repo the name gate off adds many small wrappers, so the
+  line floor matters) but has no judged real-repo precision data yet.
 
 ### Fresh held-out check (copies profile, threshold 0.6 = the `copies` default for `scan`)
 

@@ -1,7 +1,8 @@
 //! Scoring and matching of query units against a corpus.
 
 use crate::similarity::{
-    containment, cosine, dot, jaccard, lcs_ratio, multiset_dice, weighted_jaccard,
+    containment_sorted, cosine_normed, dot, inter_count, jaccard, jaccard_sorted, lcs_ratio,
+    multiset_dice, weighted_jaccard_sorted,
 };
 use crate::units::Unit;
 use std::collections::HashMap;
@@ -195,10 +196,7 @@ pub struct Idf {
 
 impl Idf {
     pub fn from_units(units: &[Unit]) -> Idf {
-        fn table<'a>(
-            sets: impl Iterator<Item = &'a std::collections::BTreeSet<u64>>,
-            n: usize,
-        ) -> HashMap<u64, f64> {
+        fn table<'a>(sets: impl Iterator<Item = &'a Vec<u64>>, n: usize) -> HashMap<u64, f64> {
             let mut df: HashMap<u64, u32> = HashMap::new();
             for s in sets {
                 for g in s {
@@ -251,15 +249,26 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
     let idf_weight = |table: fn(&Idf) -> &HashMap<u64, f64>| {
         move |g: &u64| idf.and_then(|i| table(i).get(g)).copied().unwrap_or(1.0)
     };
-    let ngram = |x: &std::collections::BTreeSet<u64>,
-                 y: &std::collections::BTreeSet<u64>,
-                 table: fn(&Idf) -> &HashMap<u64, f64>| match idf {
-        Some(_) => weighted_jaccard(x, y, idf_weight(table)),
-        None => jaccard(x, y),
+    let ngram = |x: &[u64], y: &[u64], table: fn(&Idf) -> &HashMap<u64, f64>| match idf {
+        Some(_) => weighted_jaccard_sorted(x, y, idf_weight(table)),
+        None => jaccard_sorted(x, y),
     };
+    // structural and containment both need |A ∩ B| of the same 4-gram sets: count it once
+    let shared_fp = (need(FEAT_STRUCTURAL) && need(FEAT_CONTAINMENT))
+        .then(|| inter_count(&a.fingerprint, &b.fingerprint));
     let mut s = Scores {
         structural: if need(FEAT_STRUCTURAL) {
-            ngram(&a.fingerprint, &b.fingerprint, |i| &i.fp)
+            match shared_fp {
+                Some(inter) if idf.is_none() => {
+                    let union = a.fingerprint.len() + b.fingerprint.len() - inter;
+                    if union == 0 {
+                        0.0
+                    } else {
+                        inter as f64 / union as f64
+                    }
+                }
+                _ => ngram(&a.fingerprint, &b.fingerprint, |i| &i.fp),
+            }
         } else {
             0.0
         },
@@ -269,22 +278,27 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             0.0
         },
         containment: if need(FEAT_CONTAINMENT) {
-            containment(&a.fingerprint, &b.fingerprint)
+            let m = a.fingerprint.len().min(b.fingerprint.len());
+            match shared_fp {
+                Some(inter) if m > 0 => inter as f64 / m as f64,
+                Some(_) => 0.0,
+                None => containment_sorted(&a.fingerprint, &b.fingerprint),
+            }
         } else {
             0.0
         },
         kinds: if need(FEAT_KINDS) {
-            cosine(&a.kinds, &b.kinds)
+            cosine_normed(&a.kinds, a.kinds_norm, &b.kinds, b.kinds_norm)
         } else {
             0.0
         },
         literals: if need(FEAT_LITERALS) {
-            jaccard(&a.literals, &b.literals)
+            jaccard_sorted(&a.literals_h, &b.literals_h)
         } else {
             0.0
         },
         api: if need(FEAT_API) {
-            jaccard(&a.api, &b.api)
+            jaccard_sorted(&a.api_h, &b.api_h)
         } else {
             0.0
         },
@@ -294,7 +308,7 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             0.0
         },
         callees: if need(FEAT_CALLEES) {
-            jaccard(&a.callees, &b.callees)
+            jaccard_sorted(&a.callees_h, &b.callees_h)
         } else {
             0.0
         },
@@ -392,6 +406,10 @@ pub struct MatchOptions {
     pub weights: Weights,
     /// Ignore constructors, dunder methods and similar boilerplate (as query and as candidate).
     pub skip_boilerplate: bool,
+    /// Weight the k-gram overlap by inverse document frequency over the corpus, so n-grams that
+    /// occur in most units (I/O boilerplate, loop headers) count for less. Shifts score
+    /// calibration, so the tuned thresholds were not fitted with it: opt-in.
+    pub use_idf: bool,
 }
 
 impl Default for MatchOptions {
@@ -405,6 +423,7 @@ impl Default for MatchOptions {
             weights: Weights::default(),
             skip_tests: false,
             skip_boilerplate: true,
+            use_idf: false,
         }
     }
 }
@@ -412,6 +431,9 @@ impl Default for MatchOptions {
 fn same_place(a: &Unit, b: &Unit) -> bool {
     a.file == b.file && a.start_line <= b.end_line && b.start_line <= a.end_line
 }
+
+/// Name similarity from which a candidate counts as name-matching (the default `--min-name`).
+const NAME_PREFERRED: f64 = 0.3;
 
 /// A searchable set of units with an inverted index over their k-gram fingerprints.
 pub struct Corpus {
@@ -421,6 +443,7 @@ pub struct Corpus {
     name_postings: std::collections::HashMap<String, Vec<u32>>,
     /// distinct name embeddings with their units (empty unless embeddings are enabled)
     sem_names: Vec<(std::sync::Arc<[f32]>, Vec<u32>)>,
+    idf: Idf,
 }
 
 impl Corpus {
@@ -452,8 +475,10 @@ impl Corpus {
             }
         }
         let sem_names = by_name.into_values().collect();
+        let idf = Idf::from_units(&units);
         Corpus {
             units,
+            idf,
             postings,
             name_postings,
             sem_names,
@@ -523,8 +548,13 @@ impl Corpus {
             } else {
                 0.0
             };
-        let min_jaccard =
+        let mut min_jaccard =
             ((threshold / w.renorm_scale(skippable) - rest) / w.w[FEAT_STRUCTURAL]).max(0.0);
+        if opts.use_idf {
+            // an IDF-weighted overlap can exceed the plain one when the shared n-grams are rare,
+            // so the exact bound no longer holds: loosen it (heuristic)
+            min_jaccard *= 0.6;
+        }
         if min_jaccard <= 0.0 {
             // the other features alone can reach the threshold, so a pair sharing no 4-gram at all
             // can still match: the k-gram index cannot prune anything
@@ -558,7 +588,10 @@ impl Corpus {
                     && c.lang.family() == q.lang.family()
                     && !same_place(q, c)
             })
-            .map(|c| (c, score_lean(q, c, &opts.weights)))
+            .map(|c| {
+                let idf = opts.use_idf.then_some(&self.idf);
+                (c, score_impl(q, c, &opts.weights, idf, true))
+            })
             .filter(|(c, s)| {
                 s.combined >= opts.threshold
                     && s.name >= opts.min_name
@@ -572,8 +605,31 @@ impl Corpus {
                     && (!(q.is_test || c.is_test) || s.structural >= 0.95)
             })
             .collect();
-        hits.sort_by(|a, b| b.1.combined.total_cmp(&a.1.combined));
-        hits.truncate(opts.top_n);
+        // candidates come out of a hash map: break score ties by place so results are stable
+        hits.sort_by(|a, b| {
+            b.1.combined
+                .total_cmp(&a.1.combined)
+                .then_with(|| (&a.0.file, a.0.start_line).cmp(&(&b.0.file, b.0.start_line)))
+        });
+        if opts.min_name < NAME_PREFERRED {
+            // name gate off: unrelated-name look-alikes would otherwise push name-matching
+            // candidates out of the top N, so also keep the best name-matching ones (the set a
+            // gated run would have returned)
+            let mut kept = 0;
+            let mut rank = 0;
+            hits.retain(|h| {
+                rank += 1;
+                if rank <= opts.top_n {
+                    kept += usize::from(h.1.name >= NAME_PREFERRED);
+                    return true;
+                }
+                let keep = h.1.name >= NAME_PREFERRED && kept < opts.top_n;
+                kept += usize::from(keep);
+                keep
+            });
+        } else {
+            hits.truncate(opts.top_n);
+        }
         hits
     }
 }
@@ -677,9 +733,14 @@ pub fn load_units(root: &std::path::Path) -> Vec<Unit> {
 }
 
 pub fn load_units_with(root: &std::path::Path, excludes: &[String]) -> Vec<Unit> {
+    use rayon::prelude::*;
+    // parsing dominates the load; the indexed collect keeps the file order, so output is stable
     walk_files(root, excludes)
-        .iter()
-        .flat_map(|p| units_from_file(root, p))
+        .par_iter()
+        .map(|p| units_from_file(root, p))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
         .collect()
 }
 
@@ -732,7 +793,7 @@ mod tests {
             .flat_map(|(i, s)| units(&format!("{i}.py"), s))
             .collect();
         all[1].fingerprint = (1..9u64).map(|i| i << 40).collect();
-        assert!(all[0].fingerprint.is_disjoint(&all[1].fingerprint));
+        assert_eq!(inter_count(&all[0].fingerprint, &all[1].fingerprint), 0);
         let corpus = Corpus::new(all.clone());
         for (name, weights) in [
             ("reimpl", Weights::default()),
@@ -750,6 +811,7 @@ mod tests {
                     weights,
                     skip_tests: false,
                     skip_boilerplate: false,
+                    use_idf: false,
                 };
                 for q in &all {
                     let brute = all
@@ -820,6 +882,7 @@ mod tests {
             weights: Weights::default(),
             skip_tests: false,
             skip_boilerplate: false,
+            use_idf: false,
         };
         for q in &all {
             let brute = all

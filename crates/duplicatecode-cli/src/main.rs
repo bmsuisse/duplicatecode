@@ -247,6 +247,22 @@ impl Profile {
     /// too (measured with MiniLM: score at 1% / 0.1% false-positive rate goes from ~0.27 / 0.35 to
     /// ~0.33 / 0.42), so the `reimpl` defaults move up with it. `copies` thresholds were tuned on
     /// judged real pairs and are left alone.
+    /// The name gate hides renamed re-implementations (no shared name subword = never scored),
+    /// which is exactly what `reimpl` looks for.
+    fn default_min_lines(self) -> u32 {
+        match self {
+            Profile::Copies => 6,
+            Profile::Reimpl => 12,
+        }
+    }
+
+    fn default_min_name(self) -> f64 {
+        match self {
+            Profile::Copies => 0.3,
+            Profile::Reimpl => 0.0,
+        }
+    }
+
     fn default_threshold(self, command: Command, embedded: bool) -> f64 {
         match (self, command) {
             (Profile::Copies, Command::Diff) => 0.4,
@@ -304,15 +320,21 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
+        /// Default 0.3 for `copies`, 0 for `reimpl`.
+        #[arg(long)]
+        min_name: Option<f64>,
         /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
-        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
-        /// Ignore units shorter than this many lines.
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
+        /// Units shorter than this only match as near-exact same-name copies. Default 6 for
+        /// `copies`, 12 for `reimpl` (with the name gate off, tiny wrappers flood the results).
+        #[arg(long)]
+        min_lines: Option<u32>,
         #[arg(long)]
         json: bool,
     },
@@ -328,10 +350,10 @@ enum Cmd {
         /// Lower = more candidates (recall), higher = fewer (precision).
         #[arg(long)]
         threshold: Option<f64>,
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        #[arg(long)]
+        min_name: Option<f64>,
+        #[arg(long)]
+        min_lines: Option<u32>,
         #[arg(long)]
         skip_tests: bool,
         #[arg(long, default_value_t = 40)]
@@ -349,6 +371,10 @@ enum Cmd {
         preview_lines: usize,
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
     },
     /// Embed identifiers and print their cosine similarity (to check credentials and calibrate `--embed-floor`).
     EmbedTest {
@@ -389,6 +415,9 @@ enum Cmd {
         /// Minimum number of consecutive identical statements.
         #[arg(long, default_value_t = 4)]
         min_stmts: usize,
+        /// Statements that may differ between two shared runs without splitting the fragment.
+        #[arg(long, default_value_t = 1)]
+        max_gap: usize,
         /// Minimum normalized tokens in the shared run.
         #[arg(long, default_value_t = 30)]
         min_tokens: usize,
@@ -419,15 +448,24 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
+        /// Default 0.3 for `copies`, 0 for `reimpl`.
+        #[arg(long)]
+        min_name: Option<f64>,
+        /// Best matches kept per unit before pairing (more = fewer pairs lost to look-alikes).
+        #[arg(long, default_value_t = 3)]
+        top_n: usize,
         /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
-        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
-        /// Ignore units shorter than this many lines.
-        #[arg(long, default_value_t = 6)]
-        min_lines: u32,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
+        /// Units shorter than this only match as near-exact same-name copies. Default 6 for
+        /// `copies`, 12 for `reimpl` (with the name gate off, tiny wrappers flood the results).
+        #[arg(long)]
+        min_lines: Option<u32>,
         /// Ignore test code (about half of the noise in the judged repos, but also some real copies).
         #[arg(long)]
         skip_tests: bool,
@@ -562,7 +600,13 @@ fn group_pairs(pairs: &[duplicatecode_engine::Match]) -> Vec<Group> {
             }
         })
         .collect();
-    groups.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // components come out of a hash map: break score ties by the first member's place
+    groups.sort_by(|a, b| {
+        let first = |g: &Group| g.units.first().map(|u| (u.file.clone(), u.start_line));
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| first(a).cmp(&first(b)))
+    });
     groups
 }
 
@@ -589,6 +633,7 @@ fn main() -> Result<()> {
             min_tokens,
             min_name,
             profile,
+            idf,
             min_lines,
             json,
         } => {
@@ -621,9 +666,10 @@ fn main() -> Result<()> {
             let opts = MatchOptions {
                 threshold,
                 min_tokens,
-                min_name,
-                min_lines,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
                 ..Default::default()
             };
             // when both sides are new code the pair shows up twice; report it once
@@ -668,6 +714,7 @@ fn main() -> Result<()> {
             tier,
             preview_lines,
             profile,
+            idf,
         } => {
             let threshold = threshold
                 .unwrap_or(profile.default_threshold(Command::Review, embed.code_enabled()));
@@ -689,8 +736,8 @@ fn main() -> Result<()> {
             embed.apply(&mut units)?;
             let o = review::ReviewOptions {
                 threshold,
-                min_name,
-                min_lines,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 skip_tests,
                 max_groups,
                 offset,
@@ -698,6 +745,7 @@ fn main() -> Result<()> {
                 tier,
                 preview_lines,
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
             };
             print!("{}", review::run(units, &src, &o));
         }
@@ -776,6 +824,7 @@ fn main() -> Result<()> {
             paths,
             exclude,
             min_stmts,
+            max_gap,
             min_tokens,
             skip_tests,
             cross_file,
@@ -788,6 +837,7 @@ fn main() -> Result<()> {
                 duplicatecode_engine::fragments::FragmentOptions {
                     min_stmts,
                     min_tokens,
+                    max_gap,
                     ..Default::default()
                 },
             );
@@ -867,7 +917,9 @@ fn main() -> Result<()> {
             threshold,
             min_tokens,
             min_name,
+            top_n,
             profile,
+            idf,
             min_lines,
             skip_tests,
             cross_file,
@@ -887,11 +939,12 @@ fn main() -> Result<()> {
             let opts = MatchOptions {
                 threshold,
                 min_tokens,
-                top_n: 3,
-                min_name,
-                min_lines,
+                top_n,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
+                min_lines: min_lines.unwrap_or(profile.default_min_lines()),
                 skip_tests,
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
                 ..Default::default()
             };
             let mut seen = std::collections::HashSet::new();
@@ -908,7 +961,20 @@ fn main() -> Result<()> {
                     seen.insert(if a < b { (a, b) } else { (b, a) })
                 })
                 .collect();
-            pairs.sort_by(|a, b| b.scores.combined.total_cmp(&a.scores.combined));
+            pairs.sort_by(|a, b| {
+                let key = |m: &duplicatecode_engine::Match| {
+                    (
+                        m.query.file.clone(),
+                        m.query.start_line,
+                        m.candidate.file.clone(),
+                        m.candidate.start_line,
+                    )
+                };
+                b.scores
+                    .combined
+                    .total_cmp(&a.scores.combined)
+                    .then_with(|| key(a).cmp(&key(b)))
+            });
             let groups = group_pairs(&pairs);
             // keyed by the full place: units that start on the same line (minified code, one-line
             // classes) must not be mixed up

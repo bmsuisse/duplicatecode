@@ -223,6 +223,7 @@ fn sweep(
         weights: Weights::default(),
         skip_tests: false,
         skip_boilerplate: true,
+        use_idf: false,
     };
     println!(
         "\n== threshold sweep vs. negatives corpus {} ({} units) ==",
@@ -653,6 +654,7 @@ pub fn reimpl_eval(cases_path: &Path, impls: &Path) -> Result<()> {
                     weights: *w,
                     skip_tests: false,
                     skip_boilerplate: false,
+                    use_idf: false,
                 };
                 let hits = corpus.best_for(q, opts);
                 let orig = hits

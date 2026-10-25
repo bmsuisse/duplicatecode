@@ -247,6 +247,15 @@ impl Profile {
     /// too (measured with MiniLM: score at 1% / 0.1% false-positive rate goes from ~0.27 / 0.35 to
     /// ~0.33 / 0.42), so the `reimpl` defaults move up with it. `copies` thresholds were tuned on
     /// judged real pairs and are left alone.
+    /// The name gate hides renamed re-implementations (no shared name subword = never scored),
+    /// which is exactly what `reimpl` looks for.
+    fn default_min_name(self) -> f64 {
+        match self {
+            Profile::Copies => 0.3,
+            Profile::Reimpl => 0.0,
+        }
+    }
+
     fn default_threshold(self, command: Command, embedded: bool) -> f64 {
         match (self, command) {
             (Profile::Copies, Command::Diff) => 0.4,
@@ -304,10 +313,11 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
+        /// Default 0.3 for `copies`, 0 for `reimpl`.
+        #[arg(long)]
+        min_name: Option<f64>,
         /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
-        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
         /// Ignore units shorter than this many lines.
@@ -328,8 +338,8 @@ enum Cmd {
         /// Lower = more candidates (recall), higher = fewer (precision).
         #[arg(long)]
         threshold: Option<f64>,
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
+        #[arg(long)]
+        min_name: Option<f64>,
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
         #[arg(long)]
@@ -419,10 +429,11 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         min_tokens: usize,
         /// Minimum name similarity (0 = also report look-alikes with unrelated names).
-        #[arg(long, default_value_t = 0.3)]
-        min_name: f64,
+        /// Default 0.3 for `copies`, 0 for `reimpl`.
+        #[arg(long)]
+        min_name: Option<f64>,
         /// `copies`: tuned on real repos, favours same-name copy-paste. `reimpl`: structure-heavy,
-        /// finds renamed re-implementations (experimental, use with --min-name 0).
+        /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
         /// Ignore units shorter than this many lines.
@@ -621,7 +632,7 @@ fn main() -> Result<()> {
             let opts = MatchOptions {
                 threshold,
                 min_tokens,
-                min_name,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
                 min_lines,
                 weights: embed.weights(profile.weights()),
                 ..Default::default()
@@ -689,7 +700,7 @@ fn main() -> Result<()> {
             embed.apply(&mut units)?;
             let o = review::ReviewOptions {
                 threshold,
-                min_name,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
                 min_lines,
                 skip_tests,
                 max_groups,
@@ -888,7 +899,7 @@ fn main() -> Result<()> {
                 threshold,
                 min_tokens,
                 top_n: 3,
-                min_name,
+                min_name: min_name.unwrap_or(profile.default_min_name()),
                 min_lines,
                 skip_tests,
                 weights: embed.weights(profile.weights()),

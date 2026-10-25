@@ -320,6 +320,10 @@ enum Cmd {
         /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
         /// Ignore units shorter than this many lines.
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
@@ -359,6 +363,10 @@ enum Cmd {
         preview_lines: usize,
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
     },
     /// Embed identifiers and print their cosine similarity (to check credentials and calibrate `--embed-floor`).
     EmbedTest {
@@ -439,6 +447,10 @@ enum Cmd {
         /// finds renamed re-implementations (experimental; implies --min-name 0).
         #[arg(long, value_enum, default_value_t = Profile::Copies)]
         profile: Profile,
+        /// Weight k-gram overlap by corpus rarity (boilerplate n-grams count less). Shifts score
+        /// calibration; experimental.
+        #[arg(long)]
+        idf: bool,
         /// Ignore units shorter than this many lines.
         #[arg(long, default_value_t = 6)]
         min_lines: u32,
@@ -603,6 +615,7 @@ fn main() -> Result<()> {
             min_tokens,
             min_name,
             profile,
+            idf,
             min_lines,
             json,
         } => {
@@ -638,6 +651,7 @@ fn main() -> Result<()> {
                 min_name: min_name.unwrap_or(profile.default_min_name()),
                 min_lines,
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
                 ..Default::default()
             };
             // when both sides are new code the pair shows up twice; report it once
@@ -682,6 +696,7 @@ fn main() -> Result<()> {
             tier,
             preview_lines,
             profile,
+            idf,
         } => {
             let threshold = threshold
                 .unwrap_or(profile.default_threshold(Command::Review, embed.code_enabled()));
@@ -712,6 +727,7 @@ fn main() -> Result<()> {
                 tier,
                 preview_lines,
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
             };
             print!("{}", review::run(units, &src, &o));
         }
@@ -884,6 +900,7 @@ fn main() -> Result<()> {
             min_tokens,
             min_name,
             profile,
+            idf,
             min_lines,
             skip_tests,
             cross_file,
@@ -908,6 +925,7 @@ fn main() -> Result<()> {
                 min_lines,
                 skip_tests,
                 weights: embed.weights(profile.weights()),
+                use_idf: idf,
                 ..Default::default()
             };
             let mut seen = std::collections::HashSet::new();

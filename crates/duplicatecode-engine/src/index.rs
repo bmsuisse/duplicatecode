@@ -392,6 +392,10 @@ pub struct MatchOptions {
     pub weights: Weights,
     /// Ignore constructors, dunder methods and similar boilerplate (as query and as candidate).
     pub skip_boilerplate: bool,
+    /// Weight the k-gram overlap by inverse document frequency over the corpus, so n-grams that
+    /// occur in most units (I/O boilerplate, loop headers) count for less. Shifts score
+    /// calibration, so the tuned thresholds were not fitted with it: opt-in.
+    pub use_idf: bool,
 }
 
 impl Default for MatchOptions {
@@ -405,6 +409,7 @@ impl Default for MatchOptions {
             weights: Weights::default(),
             skip_tests: false,
             skip_boilerplate: true,
+            use_idf: false,
         }
     }
 }
@@ -421,6 +426,7 @@ pub struct Corpus {
     name_postings: std::collections::HashMap<String, Vec<u32>>,
     /// distinct name embeddings with their units (empty unless embeddings are enabled)
     sem_names: Vec<(std::sync::Arc<[f32]>, Vec<u32>)>,
+    idf: Idf,
 }
 
 impl Corpus {
@@ -452,8 +458,10 @@ impl Corpus {
             }
         }
         let sem_names = by_name.into_values().collect();
+        let idf = Idf::from_units(&units);
         Corpus {
             units,
+            idf,
             postings,
             name_postings,
             sem_names,
@@ -523,8 +531,13 @@ impl Corpus {
             } else {
                 0.0
             };
-        let min_jaccard =
+        let mut min_jaccard =
             ((threshold / w.renorm_scale(skippable) - rest) / w.w[FEAT_STRUCTURAL]).max(0.0);
+        if opts.use_idf {
+            // an IDF-weighted overlap can exceed the plain one when the shared n-grams are rare,
+            // so the exact bound no longer holds: loosen it (heuristic)
+            min_jaccard *= 0.6;
+        }
         if min_jaccard <= 0.0 {
             // the other features alone can reach the threshold, so a pair sharing no 4-gram at all
             // can still match: the k-gram index cannot prune anything
@@ -558,7 +571,10 @@ impl Corpus {
                     && c.lang.family() == q.lang.family()
                     && !same_place(q, c)
             })
-            .map(|c| (c, score_lean(q, c, &opts.weights)))
+            .map(|c| {
+                let idf = opts.use_idf.then_some(&self.idf);
+                (c, score_impl(q, c, &opts.weights, idf, true))
+            })
             .filter(|(c, s)| {
                 s.combined >= opts.threshold
                     && s.name >= opts.min_name

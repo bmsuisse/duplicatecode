@@ -23,6 +23,7 @@ pub struct ReviewOptions {
     pub tier: Option<String>,
     pub preview_lines: usize,
     pub weights: Weights,
+    pub use_idf: bool,
 }
 
 struct G {
@@ -64,6 +65,7 @@ pub fn run(units: Vec<Unit>, src: &HashMap<String, PathBuf>, o: &ReviewOptions) 
         min_lines: o.min_lines,
         skip_tests: o.skip_tests,
         weights: o.weights,
+        use_idf: o.use_idf,
         ..Default::default()
     };
     let idx: HashMap<(&str, u32), usize> = units

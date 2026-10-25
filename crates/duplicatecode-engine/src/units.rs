@@ -42,9 +42,16 @@ pub struct Unit {
     /// Called function names plus accessed attribute/member names, lower-cased.
     #[serde(skip)]
     pub api: BTreeSet<String>,
+    /// Sorted hashes of `callees`, `literals` and `api` (what scoring intersects).
+    #[serde(skip)]
+    pub callees_h: Vec<u64>,
+    #[serde(skip)]
+    pub literals_h: Vec<u64>,
+    #[serde(skip)]
+    pub api_h: Vec<u64>,
     /// Histogram of syntax-node kinds (bag of structure).
     #[serde(skip)]
-    pub kinds: BTreeMap<String, u32>,
+    pub kinds: Vec<(u64, u32)>,
     /// Euclidean norm of `kinds`, cached for the cosine.
     #[serde(skip)]
     pub kinds_norm: f64,
@@ -635,6 +642,10 @@ impl Ctx<'_> {
             api,
             kinds,
         } = f;
+        let kinds = crate::similarity::hashed_histogram(&kinds);
+        let callees_h = crate::similarity::hashed_set(&callees);
+        let literals_h = crate::similarity::hashed_set(&literals);
+        let api_h = crate::similarity::hashed_set(&api);
         let fingerprint = kgram_hashes(&tokens, KGRAM);
         let fingerprint2 = kgram_hashes(&tokens, 2);
         let mut stmts = Vec::new();
@@ -674,6 +685,9 @@ impl Ctx<'_> {
             fingerprint2,
             literals,
             api,
+            callees_h,
+            literals_h,
+            api_h,
             kinds_norm: crate::similarity::norm(&kinds),
             kinds,
             stmts_exact,

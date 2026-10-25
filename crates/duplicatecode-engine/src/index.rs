@@ -293,12 +293,12 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             0.0
         },
         literals: if need(FEAT_LITERALS) {
-            jaccard(&a.literals, &b.literals)
+            jaccard_sorted(&a.literals_h, &b.literals_h)
         } else {
             0.0
         },
         api: if need(FEAT_API) {
-            jaccard(&a.api, &b.api)
+            jaccard_sorted(&a.api_h, &b.api_h)
         } else {
             0.0
         },
@@ -308,7 +308,7 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             0.0
         },
         callees: if need(FEAT_CALLEES) {
-            jaccard(&a.callees, &b.callees)
+            jaccard_sorted(&a.callees_h, &b.callees_h)
         } else {
             0.0
         },

@@ -117,38 +117,62 @@ pub fn containment<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
     a.intersection(b).count() as f64 / m as f64
 }
 
-/// Euclidean norm of a count histogram.
-pub fn norm(a: &BTreeMap<String, u32>) -> f64 {
-    a.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt()
+/// Count histogram keyed by the hash of the name, sorted by hash (for [`cosine_normed`]).
+pub fn hashed_histogram(h: &BTreeMap<String, u32>) -> Vec<(u64, u32)> {
+    use std::hash::{Hash, Hasher};
+    let mut v: Vec<(u64, u32)> = h
+        .iter()
+        .map(|(k, n)| {
+            let mut s = std::collections::hash_map::DefaultHasher::new();
+            k.hash(&mut s);
+            (s.finish(), *n)
+        })
+        .collect();
+    v.sort_unstable();
+    v
 }
 
-/// [`cosine`] with the norms already known.
-pub fn cosine_normed(
-    a: &BTreeMap<String, u32>,
-    na: f64,
-    b: &BTreeMap<String, u32>,
-    nb: f64,
-) -> f64 {
+/// Sorted, distinct hashes of a string set (for [`jaccard_sorted`]).
+pub fn hashed_set(set: &BTreeSet<String>) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut v: Vec<u64> = set
+        .iter()
+        .map(|k| {
+            let mut s = std::collections::hash_map::DefaultHasher::new();
+            k.hash(&mut s);
+            s.finish()
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Euclidean norm of a count histogram.
+pub fn norm(a: &[(u64, u32)]) -> f64 {
+    a.iter()
+        .map(|(_, x)| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Cosine of two sorted hashed histograms with their norms already known. Counts are integers,
+/// so the dot product is exact whatever the summation order.
+pub fn cosine_normed(a: &[(u64, u32)], na: f64, b: &[(u64, u32)], nb: f64) -> f64 {
     if na == 0.0 || nb == 0.0 {
         return 0.0;
     }
-    let dot: f64 = a
-        .iter()
-        .filter_map(|(k, x)| b.get(k).map(|y| *x as f64 * *y as f64))
-        .sum();
-    dot / (na * nb)
-}
-
-/// Cosine similarity of two count histograms.
-pub fn cosine(a: &BTreeMap<String, u32>, b: &BTreeMap<String, u32>) -> f64 {
-    let dot: f64 = a
-        .iter()
-        .filter_map(|(k, x)| b.get(k).map(|y| *x as f64 * *y as f64))
-        .sum();
-    let na: f64 = a.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    let nb: f64 = b.values().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
+    let (mut i, mut j, mut dot) = (0, 0, 0.0f64);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                dot += a[i].1 as f64 * b[j].1 as f64;
+                i += 1;
+                j += 1;
+            }
+        }
     }
     dot / (na * nb)
 }

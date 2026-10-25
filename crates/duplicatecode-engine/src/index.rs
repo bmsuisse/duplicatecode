@@ -257,9 +257,22 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
         Some(_) => weighted_jaccard(x, y, idf_weight(table)),
         None => jaccard(x, y),
     };
+    // structural and containment both need |A ∩ B| of the same 4-gram sets: count it once
+    let shared_fp = (need(FEAT_STRUCTURAL) && need(FEAT_CONTAINMENT))
+        .then(|| a.fingerprint.intersection(&b.fingerprint).count());
     let mut s = Scores {
         structural: if need(FEAT_STRUCTURAL) {
-            ngram(&a.fingerprint, &b.fingerprint, |i| &i.fp)
+            match shared_fp {
+                Some(inter) if idf.is_none() => {
+                    let union = a.fingerprint.len() + b.fingerprint.len() - inter;
+                    if union == 0 {
+                        0.0
+                    } else {
+                        inter as f64 / union as f64
+                    }
+                }
+                _ => ngram(&a.fingerprint, &b.fingerprint, |i| &i.fp),
+            }
         } else {
             0.0
         },
@@ -269,7 +282,12 @@ fn score_impl(a: &Unit, b: &Unit, weights: &Weights, idf: Option<&Idf>, lean: bo
             0.0
         },
         containment: if need(FEAT_CONTAINMENT) {
-            containment(&a.fingerprint, &b.fingerprint)
+            let m = a.fingerprint.len().min(b.fingerprint.len());
+            match shared_fp {
+                Some(inter) if m > 0 => inter as f64 / m as f64,
+                Some(_) => 0.0,
+                None => containment(&a.fingerprint, &b.fingerprint),
+            }
         } else {
             0.0
         },

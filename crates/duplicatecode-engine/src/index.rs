@@ -588,7 +588,12 @@ impl Corpus {
                     && (!(q.is_test || c.is_test) || s.structural >= 0.95)
             })
             .collect();
-        hits.sort_by(|a, b| b.1.combined.total_cmp(&a.1.combined));
+        // candidates come out of a hash map: break score ties by place so results are stable
+        hits.sort_by(|a, b| {
+            b.1.combined
+                .total_cmp(&a.1.combined)
+                .then_with(|| (&a.0.file, a.0.start_line).cmp(&(&b.0.file, b.0.start_line)))
+        });
         hits.truncate(opts.top_n);
         hits
     }

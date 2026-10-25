@@ -588,7 +588,13 @@ fn group_pairs(pairs: &[duplicatecode_engine::Match]) -> Vec<Group> {
             }
         })
         .collect();
-    groups.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // components come out of a hash map: break score ties by the first member's place
+    groups.sort_by(|a, b| {
+        let first = |g: &Group| g.units.first().map(|u| (u.file.clone(), u.start_line));
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| first(a).cmp(&first(b)))
+    });
     groups
 }
 
@@ -942,7 +948,20 @@ fn main() -> Result<()> {
                     seen.insert(if a < b { (a, b) } else { (b, a) })
                 })
                 .collect();
-            pairs.sort_by(|a, b| b.scores.combined.total_cmp(&a.scores.combined));
+            pairs.sort_by(|a, b| {
+                let key = |m: &duplicatecode_engine::Match| {
+                    (
+                        m.query.file.clone(),
+                        m.query.start_line,
+                        m.candidate.file.clone(),
+                        m.candidate.start_line,
+                    )
+                };
+                b.scores
+                    .combined
+                    .total_cmp(&a.scores.combined)
+                    .then_with(|| key(a).cmp(&key(b)))
+            });
             let groups = group_pairs(&pairs);
             // keyed by the full place: units that start on the same line (minified code, one-line
             // classes) must not be mixed up

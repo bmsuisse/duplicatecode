@@ -399,6 +399,9 @@ enum Cmd {
         /// Minimum number of consecutive identical statements.
         #[arg(long, default_value_t = 4)]
         min_stmts: usize,
+        /// Statements that may differ between two shared runs without splitting the fragment.
+        #[arg(long, default_value_t = 1)]
+        max_gap: usize,
         /// Minimum normalized tokens in the shared run.
         #[arg(long, default_value_t = 30)]
         min_tokens: usize,
@@ -787,6 +790,7 @@ fn main() -> Result<()> {
             paths,
             exclude,
             min_stmts,
+            max_gap,
             min_tokens,
             skip_tests,
             cross_file,
@@ -799,6 +803,7 @@ fn main() -> Result<()> {
                 duplicatecode_engine::fragments::FragmentOptions {
                     min_stmts,
                     min_tokens,
+                    max_gap,
                     ..Default::default()
                 },
             );

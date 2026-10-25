@@ -15,6 +15,9 @@ pub struct FragmentOptions {
     pub min_tokens: usize,
     /// Windows occurring in more units than this are boilerplate and ignored.
     pub max_postings: usize,
+    /// Statements that may be inserted, deleted or edited between two shared runs of the same
+    /// pair without splitting the fragment (a pasted block that was adapted a little).
+    pub max_gap: usize,
 }
 
 impl Default for FragmentOptions {
@@ -23,6 +26,7 @@ impl Default for FragmentOptions {
             min_stmts: 4,
             min_tokens: 30,
             max_postings: 64,
+            max_gap: 1,
         }
     }
 }
@@ -93,22 +97,62 @@ pub fn find_fragments(units: &[Unit], opts: FragmentOptions) -> Vec<Fragment> {
             }
         }
     }
-    let mut out = Vec::new();
+    // maximal exact runs per diagonal: (unit a, unit b) -> (start in a, start in b, length)
+    let mut runs: BTreeMap<(u32, u32), Vec<(usize, usize, usize)>> = BTreeMap::new();
     for ((ua, ub, diag), mut positions) in diagonals {
         positions.sort_unstable();
         positions.dedup();
-        let (a, b) = (&units[ua as usize], &units[ub as usize]);
         let mut i = 0;
         while i < positions.len() {
             let mut j = i;
             while j + 1 < positions.len() && positions[j + 1] == positions[j] + 1 {
                 j += 1;
             }
-            let (first, len) = (
-                positions[i] as usize,
-                positions[j] as usize - positions[i] as usize + k,
+            let first = positions[i] as usize;
+            let len = positions[j] as usize - first + k;
+            runs.entry((ua, ub))
+                .or_default()
+                .push((first, (first as i64 - diag) as usize, len));
+            i = j + 1;
+        }
+    }
+    let mut out = Vec::new();
+    for ((ua, ub), mut rs) in runs {
+        let (a, b) = (&units[ua as usize], &units[ub as usize]);
+        rs.sort_unstable();
+        // chain runs whose gap is at most `max_gap` statements on both sides: an inserted,
+        // deleted or edited statement inside a pasted block must not split it
+        let mut consumed = vec![false; rs.len()];
+        for i in 0..rs.len() {
+            if consumed[i] {
+                continue;
+            }
+            consumed[i] = true;
+            let mut chain = vec![rs[i]];
+            for j in i + 1..rs.len() {
+                if consumed[j] {
+                    continue;
+                }
+                let &(la, lb, ln) = chain.last().unwrap();
+                let (na, nb, _) = rs[j];
+                if na > la + ln + opts.max_gap {
+                    break;
+                }
+                if na >= la + ln && nb >= lb + ln && nb - (lb + ln) <= opts.max_gap {
+                    consumed[j] = true;
+                    chain.push(rs[j]);
+                }
+            }
+            let last = *chain.last().unwrap();
+            let first = chain[0];
+            let (span_a, span_b) = (
+                &a.frag[first.0..last.0 + last.2],
+                &b.frag[first.1..last.1 + last.2],
             );
-            let stmts_a = &a.frag[first..first + len];
+            let stmts_a: Vec<_> = chain
+                .iter()
+                .flat_map(|r| a.frag[r.0..r.0 + r.2].iter())
+                .collect();
             let tokens: usize = stmts_a.iter().map(|s| s.tokens as usize).sum();
             // a comprehension is expanded into several pseudo-statements on one source line:
             // count source statements, not entries
@@ -117,22 +161,20 @@ pub fn find_fragments(units: &[Unit], opts: FragmentOptions) -> Vec<Fragment> {
                 .map(|s| (s.start, s.end))
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
-            i = j + 1;
+            let span_len = last.0 + last.2 - first.0;
             if tokens < opts.min_tokens || source_stmts < k {
                 continue;
             }
-            let first_b = (first as i64 - diag) as usize;
-            let stmts_b = &b.frag[first_b..first_b + len];
             let side = |u: &Unit, s: &[crate::units::FragStmt]| FragmentRef {
                 file: u.file.clone(),
                 unit: u.name.clone(),
                 start_line: s.first().map_or(0, |x| x.start),
                 end_line: s.last().map_or(0, |x| x.end),
-                coverage: len as f64 / u.frag.len().max(1) as f64,
+                coverage: span_len as f64 / u.frag.len().max(1) as f64,
             };
             out.push(Fragment {
-                a: side(a, stmts_a),
-                b: side(b, stmts_b),
+                a: side(a, span_a),
+                b: side(b, span_b),
                 statements: source_stmts,
                 tokens,
             });
@@ -197,5 +239,38 @@ mod tests {
             }
         )
         .is_empty());
+    }
+
+    #[test]
+    fn an_edited_statement_inside_a_pasted_block_does_not_split_it() {
+        let a = "def process(rows):\n    total = 0\n    count = 0\n    for r in rows:\n        if r.ok:\n            total += r.value\n            count += 1\n    avg = total / count\n    print(avg)\n    return avg\n";
+        // one statement edited in the middle of the block
+        let b = "def other(path):\n    n = 0\n    s = 0\n    for item in path:\n        if item.ok:\n            s += item.value * 2\n            n += 1\n    mean = s / n\n    print(mean)\n    return mean\n";
+        let mut units = extract_units("a.py", Lang::Python, a);
+        units.extend(extract_units("b.py", Lang::Python, b));
+        let run = |max_gap| {
+            find_fragments(
+                &units,
+                FragmentOptions {
+                    min_stmts: 3,
+                    min_tokens: 10,
+                    max_gap,
+                    ..Default::default()
+                },
+            )
+        };
+        let tolerant = run(1);
+        let strict = run(0);
+        let best = |v: &[Fragment]| {
+            v.iter()
+                .map(|f| f.a.end_line - f.a.start_line)
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(!tolerant.is_empty(), "{tolerant:#?}");
+        assert!(
+            best(&tolerant) > best(&strict),
+            "{tolerant:#?} vs {strict:#?}"
+        );
     }
 }

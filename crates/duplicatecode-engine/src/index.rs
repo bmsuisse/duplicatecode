@@ -766,6 +766,7 @@ mod tests {
                     weights,
                     skip_tests: false,
                     skip_boilerplate: false,
+                    use_idf: false,
                 };
                 for q in &all {
                     let brute = all
@@ -836,6 +837,7 @@ mod tests {
             weights: Weights::default(),
             skip_tests: false,
             skip_boilerplate: false,
+            use_idf: false,
         };
         for q in &all {
             let brute = all

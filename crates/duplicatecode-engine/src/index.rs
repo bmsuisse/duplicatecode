@@ -693,9 +693,14 @@ pub fn load_units(root: &std::path::Path) -> Vec<Unit> {
 }
 
 pub fn load_units_with(root: &std::path::Path, excludes: &[String]) -> Vec<Unit> {
+    use rayon::prelude::*;
+    // parsing dominates the load; the indexed collect keeps the file order, so output is stable
     walk_files(root, excludes)
-        .iter()
-        .flat_map(|p| units_from_file(root, p))
+        .par_iter()
+        .map(|p| units_from_file(root, p))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
         .collect()
 }
 
